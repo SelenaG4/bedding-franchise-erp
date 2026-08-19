@@ -2,33 +2,43 @@
 
 A small, working ERP unifying three functions that are commonly siloed at a
 mid-sized manufacturer: Production (fabric -> finished bedding goods), Sales
-(franchisee orders), and Accounting (invoices/payments) -- against one shared
-system of record instead of three disconnected spreadsheets or systems.
+(across six distribution channels), and Accounting (invoices/payments) --
+against one shared system of record instead of three disconnected
+spreadsheets or systems.
 
 Run locally:
+    export ADMIN_API_KEY=some-secret-you-choose   # see app/auth.py
     uvicorn app.main:app --reload
-    python scripts/seed.py       # loads sample franchisees, products, fabric rolls
+    python scripts/seed.py       # loads sample accounts, products, fabric rolls
+                                  # -- prints each account's id + api_key
 
 Then try, in order:
     POST /production-runs   -- turn a fabric roll into finished-goods stock
-    POST /sales-orders      -- a franchisee order, deducting stock + raising an invoice
+    POST /sales-orders      -- an order through any of the six channels
     POST /invoices/{id}/payments
-    GET  /reports/summary   -- the cross-department view
+    GET  /reports/summary   -- the cross-department view (admin only)
+    GET  /reports/sales-by-channel (admin only)
+    GET  /accounts/{id}/orders          -- an account's own orders
+    GET  /accounts/{id}/outstanding-ar  -- an account's own AR
+
+Every request except GET /health and GET /channels requires an X-API-Key
+header -- either an account's own key (self-service, scoped to that account
+only) or the admin key (internal staff, sees everything). See app/auth.py.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import services
+from app import auth, services
 from app.db import get_session, init_db
-from app.models import Franchisee, Product, FabricRoll
+from app.models import Account, FabricRoll, Product, SalesChannel
 
 app = FastAPI(
     title="Bedding Franchise ERP/CRM",
-    description="Unified production, franchise sales, and accounting for a bedding manufacturer.",
-    version="0.1.0",
+    description="Unified production, multi-channel sales, and accounting for a bedding manufacturer.",
+    version="0.3.0",
 )
 
 
@@ -41,23 +51,67 @@ def db() -> Session:
     return get_session()
 
 
-# ---- setup / master data -------------------------------------------------
+ApiKeyHeader = Header(default=None, alias="X-API-Key")
 
 
-class FranchiseeIn(BaseModel):
+# ---- setup / master data (admin only -- internal ERP staff manage master data) --
+
+
+class AccountIn(BaseModel):
     name: str
-    territory: str
+    channel: SalesChannel
+    location: str
     credit_limit: float = 0.0
     contact_email: str | None = None
 
 
-@app.post("/franchisees")
-def create_franchisee(payload: FranchiseeIn) -> dict:
+@app.post("/accounts")
+def create_account(payload: AccountIn, x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
-        f = Franchisee(**payload.model_dump())
-        session.add(f)
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
+        a = Account(**payload.model_dump())
+        session.add(a)
         session.commit()
-        return {"id": f.id, "name": f.name}
+        # api_key is only ever returned in plaintext here, at creation --
+        # same convention as any real API-key-issuing system.
+        return {"id": a.id, "name": a.name, "channel": a.channel.value, "api_key": a.api_key}
+
+
+@app.post("/accounts/individual/lookup-or-create")
+def lookup_or_create_individual_account(
+    contact_email: str, name: str, location: str, x_api_key: str | None = ApiKeyHeader
+) -> dict:
+    """The manual stand-in for a POS integration (see services.
+    get_or_create_individual_account): a walk-in customer gets their own
+    persistent account keyed on contact_email instead of one shared bucket.
+    Admin-only for now -- in a real deployment, the POS terminal would call
+    this with its own service credential rather than a customer's key, since
+    a first-time customer doesn't have one yet."""
+    with db() as session:
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
+        account = services.get_or_create_individual_account(session, contact_email, name, location)
+        return {
+            "id": account.id,
+            "name": account.name,
+            "contact_email": account.contact_email,
+            "api_key": account.api_key,
+        }
+
+
+@app.get("/channels")
+def list_channels() -> dict:
+    """The checkout procedure and packaging for each sales channel. Public --
+    this is policy, not account data."""
+    return {
+        channel.value: {
+            "payment_terms": policy.payment_terms,
+            "packaging": policy.packaging,
+            "requires_po_number": policy.requires_po_number,
+            "requires_customs_docs": policy.requires_customs_docs,
+            "raises_invoice": policy.raises_invoice,
+        }
+        for channel, policy in services.CHANNEL_POLICIES.items()
+    }
 
 
 class ProductIn(BaseModel):
@@ -69,8 +123,9 @@ class ProductIn(BaseModel):
 
 
 @app.post("/products")
-def create_product(payload: ProductIn) -> dict:
+def create_product(payload: ProductIn, x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
         p = Product(**payload.model_dump())
         session.add(p)
         session.commit()
@@ -85,8 +140,9 @@ class FabricRollIn(BaseModel):
 
 
 @app.post("/fabric-rolls")
-def create_fabric_roll(payload: FabricRollIn) -> dict:
+def create_fabric_roll(payload: FabricRollIn, x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
         roll = FabricRoll(
             roll_code=payload.roll_code,
             fabric_type=payload.fabric_type,
@@ -100,7 +156,7 @@ def create_fabric_roll(payload: FabricRollIn) -> dict:
         return {"id": roll.id, "roll_code": roll.roll_code}
 
 
-# ---- production -----------------------------------------------------------
+# ---- production (admin only) -----------------------------------------------
 
 
 class ProductionRunIn(BaseModel):
@@ -110,8 +166,9 @@ class ProductionRunIn(BaseModel):
 
 
 @app.post("/production-runs")
-def create_production_run(payload: ProductionRunIn) -> dict:
+def create_production_run(payload: ProductionRunIn, x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
         try:
             run = services.run_production(
                 session, payload.product_id, payload.units_to_produce, payload.fabric_roll_id
@@ -128,7 +185,7 @@ def create_production_run(payload: ProductionRunIn) -> dict:
         }
 
 
-# ---- sales / franchise orders ---------------------------------------------
+# ---- sales across all channels ---------------------------------------------
 
 
 class OrderLineIn(BaseModel):
@@ -137,16 +194,32 @@ class OrderLineIn(BaseModel):
 
 
 class SalesOrderIn(BaseModel):
-    franchisee_id: int
+    account_id: int
     lines: list[OrderLineIn]
+    po_number: str | None = None
+    customs_declaration: str | None = None
 
 
 @app.post("/sales-orders")
-def create_sales_order(payload: SalesOrderIn) -> dict:
+def create_sales_order(payload: SalesOrderIn, x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
+        # Self-service: an account can place its own orders but not order on
+        # behalf of another account. Admin can place an order for anyone
+        # (e.g. staff taking a phone/walk-in order on a customer's behalf).
+        principal = auth.get_principal(session, x_api_key)
+        auth.ensure_account_access(principal, payload.account_id)
+
         lines = [services.OrderLineRequest(l.product_id, l.quantity) for l in payload.lines]
         try:
-            order = services.place_franchise_order(session, payload.franchisee_id, lines)
+            order = services.place_order(
+                session,
+                payload.account_id,
+                lines,
+                po_number=payload.po_number,
+                customs_declaration=payload.customs_declaration,
+            )
+        except services.ChannelRequirementError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         except services.InsufficientStockError as e:
             raise HTTPException(
                 status_code=409,
@@ -154,10 +227,16 @@ def create_sales_order(payload: SalesOrderIn) -> dict:
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return {"id": order.id, "status": order.status.value}
+        return {
+            "id": order.id,
+            "status": order.status.value,
+            "channel": order.channel.value,
+            "packaging": order.packaging,
+            "total_value": order.total_value,
+        }
 
 
-# ---- accounting -------------------------------------------------------
+# ---- accounting (admin only -- staff reconcile incoming payments) ---------
 
 
 class PaymentIn(BaseModel):
@@ -165,8 +244,9 @@ class PaymentIn(BaseModel):
 
 
 @app.post("/invoices/{invoice_id}/payments")
-def pay_invoice(invoice_id: int, payload: PaymentIn) -> dict:
+def pay_invoice(invoice_id: int, payload: PaymentIn, x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
         try:
             invoice = services.record_payment(session, invoice_id, payload.amount)
         except ValueError as e:
@@ -174,12 +254,13 @@ def pay_invoice(invoice_id: int, payload: PaymentIn) -> dict:
         return {"invoice_id": invoice.id, "balance": invoice.balance}
 
 
-# ---- reporting: the cross-department view ---------------------------------
+# ---- reporting: the cross-department view (admin only -- system-wide) -----
 
 
 @app.get("/reports/summary")
-def summary() -> dict:
+def summary(x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
         products = session.query(Product).all()
         finished_goods = {
             p.sku: services.finished_goods_stock(session, p.id) for p in products
@@ -191,10 +272,43 @@ def summary() -> dict:
         }
 
 
-@app.get("/franchisees/{franchisee_id}/outstanding-ar")
-def franchisee_ar(franchisee_id: int) -> dict:
+@app.get("/reports/sales-by-channel")
+def sales_by_channel(x_api_key: str | None = ApiKeyHeader) -> dict:
     with db() as session:
-        return {"franchisee_id": franchisee_id, "outstanding_ar": services.outstanding_ar(session, franchisee_id)}
+        auth.ensure_admin(auth.get_principal(session, x_api_key))
+        return {"channels": services.sales_by_channel(session)}
+
+
+# ---- an account's own data -- the role-based-auth boundary ----------------
+
+
+@app.get("/accounts/{account_id}/outstanding-ar")
+def account_ar(account_id: int, x_api_key: str | None = ApiKeyHeader) -> dict:
+    with db() as session:
+        principal = auth.get_principal(session, x_api_key)
+        auth.ensure_account_access(principal, account_id)
+        return {"account_id": account_id, "outstanding_ar": services.outstanding_ar(session, account_id)}
+
+
+@app.get("/accounts/{account_id}/orders")
+def account_orders(account_id: int, x_api_key: str | None = ApiKeyHeader) -> dict:
+    with db() as session:
+        principal = auth.get_principal(session, x_api_key)
+        auth.ensure_account_access(principal, account_id)
+        orders = services.orders_for_account(session, account_id)
+        return {
+            "account_id": account_id,
+            "orders": [
+                {
+                    "id": o.id,
+                    "status": o.status.value,
+                    "channel": o.channel.value,
+                    "order_date": o.order_date.isoformat(),
+                    "total_value": o.total_value,
+                }
+                for o in orders
+            ],
+        }
 
 
 @app.get("/health")

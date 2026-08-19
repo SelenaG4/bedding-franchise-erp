@@ -37,12 +37,14 @@ company-retail order still deducts finished-goods stock like any other order,
 but deliberately doesn't raise an invoice or touch accounts receivable, since
 moving stock to the company's own shop isn't a sale.
 
-**Scope simplification, stated honestly:** individual/walk-in customers are
-modeled as one shared `Direct Customer Sales` account rather than one row per
-person -- a real POS-integrated system would track each transaction
-separately. That level of per-customer tracking wasn't needed to demonstrate
-the actual point of this project (channel-differentiated checkout logic), so
-it was left out rather than built halfway.
+Individual/walk-in customers each get their own `Account` row -- same as every
+other channel, own AR, own order history, no shared bucket. What's still
+missing is a real point-of-sale integration to create/look up that account
+automatically at checkout; until that exists,
+`services.get_or_create_individual_account()` (also exposed as
+`POST /accounts/individual/lookup-or-create`) is the manual equivalent, keyed
+on `contact_email` so a repeat customer doesn't get a duplicate account every
+visit.
 
 ## The domain-specific part: fabric remnants
 
@@ -85,6 +87,34 @@ No order can exist in a half-fulfilled state. This was actually verified by a
 failing-then-passing test during development, not just asserted: see "a bug I hit"
 below.
 
+## Role-based auth
+
+Every request except `GET /health` and `GET /channels` requires an
+`X-API-Key` header. There are two roles, kept deliberately simple for what
+this system actually is (a small internal ERP, not a public multi-tenant
+product):
+
+- **`account`** -- each `Account` gets its own generated API key (returned
+  once, in plaintext, when the account is created). An account principal can
+  place its own orders and see its own `/accounts/{id}/orders` and
+  `/accounts/{id}/outstanding-ar` -- and gets a 403 on anyone else's, or on
+  the system-wide `/reports/*` endpoints.
+- **`admin`** -- one shared secret (`ADMIN_API_KEY` env var). Internal ERP
+  staff: manages master data (accounts/products/fabric rolls), records
+  production runs and payments, and can see everything, including on behalf
+  of any account.
+
+See `app/auth.py` for the full logic and `tests/test_auth.py` for the
+behavior this is meant to guarantee (missing/invalid key, an account reading
+its own vs. another's data, an account trying to place an order on another
+account's behalf, admin-only reports).
+
+This is API-key auth, not a full user/session system on purpose -- proportionate
+to a project this size, and enough to demonstrate the actual access-control
+requirement (each account is scoped to its own data). A real deployment would
+still want the admin role backed by individual staff accounts rather than one
+shared secret; see "What I'd do next."
+
 ## A bug I hit while building this
 
 Two of the tests originally asked for more units than the seeded fabric roll could
@@ -94,45 +124,71 @@ a bug in the service layer. Fixed by correcting the test fixtures, not the logic
 Kept as `tests/test_erp.py::test_production_run_rejects_insufficient_fabric` and
 the surrounding tests, which now pin this behavior deliberately.
 
+A second, more consequential one: a repo-structure cleanup commit
+("Fix repo structure: move project files to repo root") deleted the entire
+multi-channel implementation (`Account`, `SalesChannel`, `CHANNEL_POLICIES`,
+`ChannelRequirementError`, the whole six-channel `place_order()`) instead of
+moving it -- the working tree silently reverted to the single-channel,
+franchisee-only version from before that feature existed, while this README
+kept describing the multi-channel system as if it were live. Found via `git
+log`/`git show` against the object database (the multi-channel commit was
+still there, just orphaned from the working tree) and restored from the
+`Add multi-channel sales` commit rather than rewritten from scratch. Worth
+noting because it's exactly the kind of regression that's invisible unless
+you check the working tree against the docs, not just against the tests --
+the single-channel tests still passed the whole time.
+
 ## Running it
 
 ```bash
 pip install -r requirements.txt
+export ADMIN_API_KEY=some-secret-you-choose   # see "Role-based auth" above
 uvicorn app.main:app --reload
-python scripts/seed.py     # 8 accounts across all 6 channels, 18 SKUs, 9 starting rolls
+python scripts/seed.py     # 9 accounts across all 6 channels, 18 SKUs, 9 starting rolls
+                            # -- prints each account's id + api_key, and the admin key
 ```
 
-Try the full loop:
+Try the full loop (swap in the api_key values `seed.py` printed for you):
 
 ```bash
-# Turn fabric into finished goods
-curl -X POST localhost:8000/production-runs -H "Content-Type: application/json" \
+ADMIN="X-API-Key: some-secret-you-choose"
+
+# Turn fabric into finished goods (admin: production is a staff operation)
+curl -X POST localhost:8000/production-runs -H "$ADMIN" -H "Content-Type: application/json" \
   -d '{"product_id": 1, "units_to_produce": 5}'
 
-# See how each channel's checkout procedure differs
+# See how each channel's checkout procedure differs -- no auth needed, this is policy not data
 curl localhost:8000/channels
 
 # A supermarket order without a PO number is rejected (422) -- no order created
-curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "$ADMIN" -H "Content-Type: application/json" \
   -d '{"account_id": 6, "lines": [{"product_id": 1, "quantity": 1}]}'
 
 # ...with a PO number, it's confirmed and palletized
-curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "$ADMIN" -H "Content-Type: application/json" \
   -d '{"account_id": 6, "lines": [{"product_id": 1, "quantity": 1}], "po_number": "PO-1001"}'
 
 # A company-retail order moves stock but raises no invoice
-curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "$ADMIN" -H "Content-Type: application/json" \
   -d '{"account_id": 4, "lines": [{"product_id": 1, "quantity": 1}]}'
 
 # Record a payment against an invoice
-curl -X POST localhost:8000/invoices/1/payments -H "Content-Type: application/json" \
+curl -X POST localhost:8000/invoices/1/payments -H "$ADMIN" -H "Content-Type: application/json" \
   -d '{"amount": 50}'
 
-# The cross-department view: finished-goods stock, remnant fabric, total AR
-curl localhost:8000/reports/summary
+# The cross-department view: finished-goods stock, remnant fabric, total AR (admin only)
+curl -H "$ADMIN" localhost:8000/reports/summary
 
-# Revenue and order count by channel -- shows company-retail transfers alongside real sales
-curl localhost:8000/reports/sales-by-channel
+# Revenue and order count by channel (admin only)
+curl -H "$ADMIN" localhost:8000/reports/sales-by-channel
+
+# A walk-in customer, looked up/created by email (the manual stand-in for a POS integration)
+curl -X POST "localhost:8000/accounts/individual/lookup-or-create?contact_email=new.customer@example.com&name=Walk-in:%20New%20Customer&location=Zurich" \
+  -H "$ADMIN"
+
+# An account can see its own orders and AR -- but gets a 403 on another account's, or on /reports/*
+curl -H "X-API-Key: <that account's own key>" localhost:8000/accounts/8/orders
+curl -H "X-API-Key: <that account's own key>" localhost:8000/accounts/8/outstanding-ar
 ```
 
 Measured on this machine: production run + sales order + summary report each
@@ -142,14 +198,23 @@ cost here is transactional correctness, not latency.
 ### Tests
 
 ```bash
-pytest tests/ -v   # 11 passed
+pytest tests/ -v   # 21 passed
 ```
 
-Covers: remnant creation vs. scrap-below-threshold, remnant-first allocation,
-insufficient-fabric rejection (no partial stock change), atomic order rejection
-on insufficient finished-goods stock, payment/overpayment handling, and the
-three channel-specific behaviors (PO-number requirement, customs-declaration
+`tests/test_erp.py` (11 tests, pure service-layer, no auth involved): remnant
+creation vs. scrap-below-threshold, remnant-first allocation, insufficient-fabric
+rejection (no partial stock change), atomic order rejection on insufficient
+finished-goods stock, payment/overpayment handling, and the three
+channel-specific behaviors (PO-number requirement, customs-declaration
 requirement, and company-retail orders skipping invoicing).
+
+`tests/test_auth.py` (10 tests, HTTP-level via FastAPI's TestClient): missing/
+invalid API key rejected, an account reading its own vs. another account's
+orders/AR (200 vs. 403), an account trying to place an order on another
+account's behalf (403), admin seeing any account's data and the system-wide
+reports, an account being blocked from those same reports, two individual/
+walk-in accounts never sharing AR or order history, and
+`lookup-or-create` being idempotent per `contact_email`.
 
 ### Docker
 
@@ -174,7 +239,14 @@ Swagger UI to try every endpoint above directly in the browser.
   demo, not for multiple channels writing at once).
 - Add a reorder-point alert on finished-goods stock, mirroring the remnant-tracking
   idea: flag SKUs below a threshold the same way remnants are flagged.
-- Add role-based auth so each account can only see their own orders/AR, not the
-  whole system.
-- Track individual/walk-in customers as their own accounts instead of one shared
-  bucket, once there's an actual POS integration driving that channel.
+- Replace the single shared `ADMIN_API_KEY` with a real staff/user table --
+  right now every internal user is indistinguishable from every other admin,
+  which is fine for a demo and not fine for a real deployment (no per-staff
+  audit trail, no way to revoke one person's access).
+- Wire `services.get_or_create_individual_account()` up to an actual
+  point-of-sale system instead of the manual/API-triggered lookup -- the data
+  model and access control are ready for it; the integration itself doesn't
+  exist yet because there's no POS system in this project to integrate with.
+- API keys are returned once in plaintext and stored in the DB as plain text
+  columns -- fine for a demo, but a real system would hash them at rest
+  (like passwords) and support rotation/revocation.
