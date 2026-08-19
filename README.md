@@ -7,8 +7,8 @@ manufacturer's first ERP/CRM rollout is usually solving.
 
 ## Why this exists
 
-This is a new build (Aug 2026), not a reconstruction of any specific past system --
-it's a from-scratch demonstration of the kind of production/sales/accounting
+A reconstruction of bedding franchising sales, production and inventory system. --
+it's a h demonstration of the kind of production/sales/accounting
 integration problem that comes up when leading an ERP/CRM implementation at a
 manufacturer: siloed departments, a real material-tracking problem (leftover
 fabric) that a generic "orders and inventory" schema wouldn't capture, and a
