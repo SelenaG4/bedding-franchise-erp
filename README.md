@@ -275,10 +275,12 @@ daemon -- build locally to confirm before demoing.)
 
 ### Live demo
 
-Deployed on Render's free tier: **[link added once deployed]**. The free tier
-spins the container down after 15 minutes idle, so the first request after a
-lull takes ~20-30s to wake it back up -- visit `/docs` for the interactive
-Swagger UI to try every endpoint above directly in the browser.
+Deployed on Render's free tier: **https://bedding-franchise-erp.onrender.com/**.
+The free tier spins the container down after 15 minutes idle, so the first
+request after a lull takes ~20-30s to wake it back up -- visit
+[`/docs`](https://bedding-franchise-erp.onrender.com/docs) for the interactive
+Swagger UI to try every endpoint above directly in the browser, including the
+two planning tools (`/optimization/production-plan`, `/simulation/reorder-point`).
 
 ## What I'd do next with more time
 
