@@ -1,0 +1,17 @@
+flowchart LR
+    Start(["Run scripts/seed.py"]) --> Keys["Get your API keys<br/>1 admin key + 1 key per account,<br/>printed once to the console"]
+
+    Keys --> Setup["<b>1. Setup</b> -- admin key<br/>POST /products<br/>POST /fabric-rolls<br/>POST /accounts"]
+
+    Setup --> Produce["<b>2. Produce</b> -- admin key<br/>POST /production-runs<br/><i>leftover fabric auto-tracked:<br/>reusable remnant, or scrap</i>"]
+
+    Produce --> Sell["<b>3. Sell</b> -- account's own key, or admin<br/>POST /sales-orders<br/>across any of 6 channels:<br/>individual, online, company retail,<br/>supermarket, franchisee, international<br/><br/><i>an account key only ever sees<br/>its own orders + AR, never another's</i>"]
+
+    Sell --> Pay["<b>4. Get paid</b> -- admin key<br/>POST /invoices/id/payments"]
+
+    Pay --> Review["<b>5. Review</b> -- admin key<br/>GET /reports/summary<br/>POST /optimization/production-plan<br/><i>MILP vs. greedy, compared</i><br/>POST /simulation/reorder-point<br/><i>Monte Carlo vs. textbook formula</i>"]
+
+    classDef stepBox fill:#EEF2FB,stroke:#1F3864,stroke-width:1.5px,color:#1F3864,text-align:left
+    classDef startEnd fill:#1F3864,stroke:#1F3864,stroke-width:1.5px,color:#ffffff
+    class Start startEnd
+    class Keys,Setup,Produce,Sell,Pay,Review stepBox

@@ -192,3 +192,51 @@ def test_lookup_or_create_individual_account_is_idempotent_per_email(client, two
         headers=headers,
     ).json()
     assert again["id"] == two_accounts["walkin"]["id"]  # same customer, same account -- not a duplicate
+
+
+def test_list_accounts_requires_admin(client, two_accounts):
+    no_key = client.get("/accounts")
+    assert no_key.status_code == 401
+
+    account_key = client.get("/accounts", headers={"X-API-Key": two_accounts["franchisee"]["api_key"]})
+    assert account_key.status_code == 403
+
+    admin = client.get("/accounts", headers=two_accounts["admin_headers"])
+    assert admin.status_code == 200
+    ids = {a["id"] for a in admin.json()["accounts"]}
+    assert two_accounts["franchisee"]["id"] in ids
+    assert two_accounts["walkin"]["id"] in ids
+
+
+def test_production_plan_requires_admin(client, two_accounts):
+    """The two planning tools (optimization/simulation) are internal staff
+    tools, gated the same way as production and reports -- not part of the
+    original auth test suite since they were added in a different session,
+    added here so the whole API surface's auth is actually proven, not just
+    the endpoints that happened to exist when app/auth.py was written."""
+    no_key = client.post("/optimization/production-plan", json={"pending_runs": []})
+    assert no_key.status_code == 401
+
+    account_key = client.post(
+        "/optimization/production-plan",
+        json={"pending_runs": []},
+        headers={"X-API-Key": two_accounts["franchisee"]["api_key"]},
+    )
+    assert account_key.status_code == 403
+
+    admin = client.post(
+        "/optimization/production-plan", json={"pending_runs": []}, headers=two_accounts["admin_headers"]
+    )
+    assert admin.status_code == 200
+
+
+def test_reorder_point_requires_admin(client, two_accounts):
+    no_key = client.post("/simulation/reorder-point", json={"product_id": 1, "lead_time_days": 7})
+    assert no_key.status_code == 401
+
+    account_key = client.post(
+        "/simulation/reorder-point",
+        json={"product_id": 1, "lead_time_days": 7},
+        headers={"X-API-Key": two_accounts["franchisee"]["api_key"]},
+    )
+    assert account_key.status_code == 403

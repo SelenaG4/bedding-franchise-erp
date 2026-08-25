@@ -9,8 +9,11 @@ spreadsheets or systems.
 Run locally:
     uvicorn app.main:app --reload
     python scripts/seed.py       # loads sample accounts, products, fabric rolls
+                                  # -- also prints the admin key + each account's
+                                  # own API key, needed for every request below
 
-Then try, in order:
+Then try, in order (every request needs an X-API-Key header -- see "Role-based
+auth" below):
     POST /production-runs   -- turn a fabric roll into finished-goods stock
     POST /sales-orders      -- an order through any of the six channels
     POST /invoices/{id}/payments
@@ -22,22 +25,40 @@ Two planning tools, on top of the day-to-day operations above:
                                             heuristic vs. MILP-optimal, compared
     POST /simulation/reorder-point      -- Monte Carlo reorder-point/safety-stock
                                             recommendation vs. the textbook formula
+
+Role-based auth (app/auth.py): every request needs an `X-API-Key` header.
+- The admin key (`ADMIN_API_KEY`) can do everything -- setup/master data,
+  production, reports, and any account's orders/AR.
+- Each sales account has its own key (`Account.api_key`, generated at
+  creation and printed by scripts/seed.py) and can only place its own orders
+  and see its own orders/AR -- never another account's, never system-wide
+  reports. That scoping is enforced at this API boundary
+  (app/auth.get_principal + ensure_account_access/ensure_admin), not inside
+  app/services.py, which stays pure business logic with no notion of who's
+  asking.
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import optimization, services, simulation
+from app import auth, optimization, services, simulation
 from app.db import get_session, init_db
-from app.models import Account, FabricRoll, Product, SalesChannel
+from app.models import Account, FabricRoll, Product, SalesChannel, SalesOrder
 
 app = FastAPI(
     title="Bedding Franchise ERP/CRM",
     description="Unified production, multi-channel sales, and accounting for a bedding manufacturer.",
-    version="0.3.0",
+    version="0.4.0",
 )
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
 @app.on_event("startup")
@@ -45,11 +66,51 @@ def _startup() -> None:
     init_db()
 
 
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def landing_page() -> str:
+    """Plain-language landing page for non-technical reviewers -- an API key
+    field, a KPI dashboard, the roadmap and schema diagrams, and a form for
+    every operation in the README, so nobody needs to know REST/JSON to try
+    this. /docs (Swagger) is still there for anyone who wants the raw API."""
+    return (_STATIC_DIR / "index.html").read_text()
+
+
 def db() -> Session:
     return get_session()
 
 
-# ---- setup / master data -------------------------------------------------
+def _current_principal(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> auth.Principal:
+    """FastAPI dependency wrapping app.auth.get_principal(): opens its own
+    short-lived session just to resolve the caller's identity from the
+    X-API-Key header, separate from the session each route handler opens for
+    its own work below. Two connections per request is a bit more than
+    strictly necessary at this scale, but keeps auth resolution decoupled
+    from each route's own transaction -- simpler to reason about than
+    threading one shared session through FastAPI's dependency graph for a
+    project this size."""
+    with db() as session:
+        return auth.get_principal(session, x_api_key)
+
+
+def _account_out(a: Account) -> dict:
+    return {"id": a.id, "name": a.name, "channel": a.channel.value, "api_key": a.api_key}
+
+
+def _order_out(o: SalesOrder) -> dict:
+    return {
+        "id": o.id,
+        "account_id": o.account_id,
+        "status": o.status.value,
+        "channel": o.channel.value,
+        "packaging": o.packaging,
+        "po_number": o.po_number,
+        "customs_declaration": o.customs_declaration,
+        "total_value": o.total_value,
+        "order_date": o.order_date.isoformat(),
+    }
+
+
+# ---- setup / master data (admin only) --------------------------------------
 
 
 class AccountIn(BaseModel):
@@ -61,17 +122,50 @@ class AccountIn(BaseModel):
 
 
 @app.post("/accounts")
-def create_account(payload: AccountIn) -> dict:
+def create_account(payload: AccountIn, principal: auth.Principal = Depends(_current_principal)) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         a = Account(**payload.model_dump())
         session.add(a)
         session.commit()
-        return {"id": a.id, "name": a.name, "channel": a.channel.value}
+        return _account_out(a)
+
+
+@app.post("/accounts/individual/lookup-or-create")
+def lookup_or_create_individual_account(
+    contact_email: str,
+    name: str,
+    location: str,
+    principal: auth.Principal = Depends(_current_principal),
+) -> dict:
+    """The admin-facing counterpart to services.get_or_create_individual_account():
+    looks up an existing individual/walk-in account by contact_email, or
+    creates one, so a repeat walk-in customer gets their own persistent
+    account (and their own AR/order history) rather than everyone sharing one
+    bucket account. A real POS integration would call this at checkout time."""
+    auth.ensure_admin(principal)
+    with db() as session:
+        account = services.get_or_create_individual_account(session, contact_email, name, location)
+        return _account_out(account)
+
+
+@app.get("/accounts")
+def list_accounts(principal: auth.Principal = Depends(_current_principal)) -> dict:
+    """Admin only -- listing every account (with its api_key) is exactly the
+    kind of system-wide visibility the role-based auth model reserves for
+    admin. Powers the demo landing page's account picker, which lets a
+    visitor copy a specific account's key and see the access scoping
+    enforced live rather than just described."""
+    auth.ensure_admin(principal)
+    with db() as session:
+        accounts = session.query(Account).order_by(Account.id).all()
+        return {"accounts": [_account_out(a) for a in accounts]}
 
 
 @app.get("/channels")
 def list_channels() -> dict:
-    """The checkout procedure and packaging for each sales channel."""
+    """The checkout procedure and packaging for each sales channel. Public --
+    informational, not account-specific, no auth required."""
     return {
         channel.value: {
             "payment_terms": policy.payment_terms,
@@ -93,7 +187,8 @@ class ProductIn(BaseModel):
 
 
 @app.post("/products")
-def create_product(payload: ProductIn) -> dict:
+def create_product(payload: ProductIn, principal: auth.Principal = Depends(_current_principal)) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         p = Product(**payload.model_dump())
         session.add(p)
@@ -109,7 +204,8 @@ class FabricRollIn(BaseModel):
 
 
 @app.post("/fabric-rolls")
-def create_fabric_roll(payload: FabricRollIn) -> dict:
+def create_fabric_roll(payload: FabricRollIn, principal: auth.Principal = Depends(_current_principal)) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         roll = FabricRoll(
             roll_code=payload.roll_code,
@@ -124,7 +220,7 @@ def create_fabric_roll(payload: FabricRollIn) -> dict:
         return {"id": roll.id, "roll_code": roll.roll_code}
 
 
-# ---- production -----------------------------------------------------------
+# ---- production (admin only) -----------------------------------------------
 
 
 class ProductionRunIn(BaseModel):
@@ -134,7 +230,10 @@ class ProductionRunIn(BaseModel):
 
 
 @app.post("/production-runs")
-def create_production_run(payload: ProductionRunIn) -> dict:
+def create_production_run(
+    payload: ProductionRunIn, principal: auth.Principal = Depends(_current_principal)
+) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         try:
             run = services.run_production(
@@ -152,7 +251,7 @@ def create_production_run(payload: ProductionRunIn) -> dict:
         }
 
 
-# ---- sales across all channels --------------------------------------------
+# ---- sales across all channels (any authenticated principal, scoped) ------
 
 
 class OrderLineIn(BaseModel):
@@ -168,7 +267,13 @@ class SalesOrderIn(BaseModel):
 
 
 @app.post("/sales-orders")
-def create_sales_order(payload: SalesOrderIn) -> dict:
+def create_sales_order(
+    payload: SalesOrderIn, principal: auth.Principal = Depends(_current_principal)
+) -> dict:
+    """Admin can place an order for any account. An account principal can
+    only place an order for itself -- attempting to order on behalf of a
+    different account_id is rejected (403) before anything is touched."""
+    auth.ensure_account_access(principal, payload.account_id)
     with db() as session:
         lines = [services.OrderLineRequest(l.product_id, l.quantity) for l in payload.lines]
         try:
@@ -188,16 +293,10 @@ def create_sales_order(payload: SalesOrderIn) -> dict:
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return {
-            "id": order.id,
-            "status": order.status.value,
-            "channel": order.channel.value,
-            "packaging": order.packaging,
-            "total_value": order.total_value,
-        }
+        return _order_out(order)
 
 
-# ---- accounting -------------------------------------------------------
+# ---- accounting (admin only) -----------------------------------------------
 
 
 class PaymentIn(BaseModel):
@@ -205,7 +304,10 @@ class PaymentIn(BaseModel):
 
 
 @app.post("/invoices/{invoice_id}/payments")
-def pay_invoice(invoice_id: int, payload: PaymentIn) -> dict:
+def pay_invoice(
+    invoice_id: int, payload: PaymentIn, principal: auth.Principal = Depends(_current_principal)
+) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         try:
             invoice = services.record_payment(session, invoice_id, payload.amount)
@@ -214,11 +316,12 @@ def pay_invoice(invoice_id: int, payload: PaymentIn) -> dict:
         return {"invoice_id": invoice.id, "balance": invoice.balance}
 
 
-# ---- reporting: the cross-department view ---------------------------------
+# ---- reporting: the cross-department view (admin only) ---------------------
 
 
 @app.get("/reports/summary")
-def summary() -> dict:
+def summary(principal: auth.Principal = Depends(_current_principal)) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         products = session.query(Product).all()
         finished_goods = {
@@ -232,18 +335,35 @@ def summary() -> dict:
 
 
 @app.get("/reports/sales-by-channel")
-def sales_by_channel() -> dict:
+def sales_by_channel(principal: auth.Principal = Depends(_current_principal)) -> dict:
+    auth.ensure_admin(principal)
     with db() as session:
         return {"channels": services.sales_by_channel(session)}
 
 
+# ---- per-account views (admin, or that account's own key) -----------------
+
+
 @app.get("/accounts/{account_id}/outstanding-ar")
-def account_ar(account_id: int) -> dict:
+def account_ar(account_id: int, principal: auth.Principal = Depends(_current_principal)) -> dict:
+    auth.ensure_account_access(principal, account_id)
     with db() as session:
         return {"account_id": account_id, "outstanding_ar": services.outstanding_ar(session, account_id)}
 
 
-# ---- optimization: batch production planning ------------------------------
+@app.get("/accounts/{account_id}/orders")
+def account_orders(account_id: int, principal: auth.Principal = Depends(_current_principal)) -> dict:
+    """An account's own order history. Together with outstanding-ar above,
+    this is the full "self-service" surface a sales account's own API key
+    can reach -- everything else (setup, production, system-wide reports)
+    stays admin-only."""
+    auth.ensure_account_access(principal, account_id)
+    with db() as session:
+        orders = services.orders_for_account(session, account_id)
+        return {"account_id": account_id, "orders": [_order_out(o) for o in orders]}
+
+
+# ---- optimization: batch production planning (admin only) -----------------
 
 
 class PendingRunIn(BaseModel):
@@ -279,11 +399,15 @@ def _serialize_plan(plan: optimization.BatchPlanResult) -> dict:
 
 
 @app.post("/optimization/production-plan")
-def production_plan(payload: ProductionPlanIn) -> dict:
+def production_plan(
+    payload: ProductionPlanIn, principal: auth.Principal = Depends(_current_principal)
+) -> dict:
     """Compares the greedy one-at-a-time allocation heuristic against a
     jointly-optimal MILP assignment for the same batch of pending production
     runs against the current fabric-roll pool. See app/optimization.py for
-    the full method and its stated scope."""
+    the full method and its stated scope. Admin-only, same as production
+    and reporting -- this is an internal planning tool, not customer-facing."""
+    auth.ensure_admin(principal)
     with db() as session:
         pending = [
             optimization.PendingRun(pr.product_id, pr.units_to_produce, pr.label or "")
@@ -301,7 +425,7 @@ def production_plan(payload: ProductionPlanIn) -> dict:
         }
 
 
-# ---- simulation: reorder-point / safety-stock recommendation --------------
+# ---- simulation: reorder-point / safety-stock recommendation (admin only) -
 
 
 class ReorderPointIn(BaseModel):
@@ -312,11 +436,15 @@ class ReorderPointIn(BaseModel):
 
 
 @app.post("/simulation/reorder-point")
-def reorder_point(payload: ReorderPointIn) -> dict:
+def reorder_point(
+    payload: ReorderPointIn, principal: auth.Principal = Depends(_current_principal)
+) -> dict:
     """Monte Carlo reorder-point/safety-stock recommendation, bootstrapped
     from data/demand_history.csv (see scripts/generate_demand_history.py),
     compared against the textbook Normal-formula answer on the same
-    simulated trials. See app/simulation.py for the full method."""
+    simulated trials. See app/simulation.py for the full method. Admin-only,
+    same reasoning as the production planner above."""
+    auth.ensure_admin(principal)
     try:
         rec = simulation.recommend_reorder_point(
             payload.product_id, payload.lead_time_days, payload.target_service_level, payload.num_trials

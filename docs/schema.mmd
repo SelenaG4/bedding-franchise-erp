@@ -1,0 +1,99 @@
+erDiagram
+    ACCOUNT ||--o{ SALES_ORDER : places
+    PRODUCT ||--o{ PRODUCTION_RUN : "is made in"
+    PRODUCT ||--o{ SALES_ORDER_LINE : "is ordered as"
+    PRODUCT ||--o{ FINISHED_GOODS_MOVEMENT : "stock tracked by"
+    FABRIC_ROLL ||--o{ PRODUCTION_RUN : "consumed by"
+    FABRIC_ROLL ||--o{ FABRIC_ROLL : "leftover becomes a remnant of"
+    PRODUCTION_RUN ||--o{ FINISHED_GOODS_MOVEMENT : "adds stock via"
+    SALES_ORDER ||--|{ SALES_ORDER_LINE : contains
+    SALES_ORDER ||--o| INVOICE : raises
+    SALES_ORDER ||--o{ FINISHED_GOODS_MOVEMENT : "removes stock via"
+    INVOICE ||--o{ PAYMENT : "paid down by"
+
+    ACCOUNT {
+        int id PK
+        string name
+        enum channel "1 of 6 sales channels"
+        string location
+        float credit_limit
+        string contact_email "nullable"
+        string api_key UK "role-based auth"
+    }
+
+    PRODUCT {
+        int id PK
+        string sku UK
+        string name
+        string product_line "= fabric_type"
+        float unit_price
+        float fabric_meters_per_unit
+    }
+
+    FABRIC_ROLL {
+        int id PK
+        string roll_code UK
+        string fabric_type
+        string color
+        float total_length_m
+        float remaining_length_m
+        bool is_remnant
+        int parent_roll_id FK "nullable, self-reference"
+    }
+
+    PRODUCTION_RUN {
+        int id PK
+        int product_id FK
+        int fabric_roll_id FK
+        int units_produced
+        float fabric_consumed_m
+        float leftover_m
+        int remnant_roll_id FK "nullable"
+        float scrapped_m
+        datetime run_date
+    }
+
+    FINISHED_GOODS_MOVEMENT {
+        int id PK
+        int product_id FK
+        int quantity_delta "+production / -sale"
+        string reason
+        string ref_type "production_run / sales_order"
+        int ref_id
+        datetime timestamp
+    }
+
+    SALES_ORDER {
+        int id PK
+        int account_id FK
+        enum channel
+        datetime order_date
+        enum status
+        string packaging
+        string po_number "nullable"
+        string customs_declaration "nullable"
+        float total_value
+    }
+
+    SALES_ORDER_LINE {
+        int id PK
+        int sales_order_id FK
+        int product_id FK
+        int quantity
+        float unit_price
+    }
+
+    INVOICE {
+        int id PK
+        int sales_order_id FK
+        float amount
+        float balance
+        datetime issued_date
+    }
+
+    PAYMENT {
+        int id PK
+        int invoice_id FK
+        float amount
+        datetime payment_date
+    }

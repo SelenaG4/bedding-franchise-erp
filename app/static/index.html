@@ -1,0 +1,582 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bedding Franchise ERP/CRM</title>
+<style>
+  :root {
+    --navy: #1F3864;
+    --navy-dark: #142848;
+    --panel: #EEF2FB;
+    --panel-border: #D6E0F5;
+    --ink: #1B2338;
+    --muted: #5B6B8C;
+    --good: #1E7A46;
+    --bad: #B3261E;
+    --white: #FFFFFF;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: #F7F9FD;
+    line-height: 1.5;
+  }
+  a { color: var(--navy); }
+  header.top {
+    background: var(--navy);
+    color: white;
+    padding: 20px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header.top h1 { margin: 0; font-size: 1.3rem; }
+  header.top .tagline { font-size: 0.85rem; opacity: 0.85; margin-top: 2px; }
+  header.top nav a {
+    color: white;
+    text-decoration: none;
+    margin-left: 18px;
+    font-size: 0.9rem;
+    border-bottom: 1px solid rgba(255,255,255,0.4);
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 20px 60px; }
+  section { margin-bottom: 36px; }
+  h2 { font-size: 1.15rem; margin: 0 0 6px; color: var(--navy); }
+  h2 .step-no {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--navy);
+    color: white;
+    font-size: 0.8rem;
+    margin-right: 8px;
+  }
+  p.lead { color: var(--muted); margin-top: 0; font-size: 0.92rem; }
+  .card {
+    background: var(--white);
+    border: 1px solid var(--panel-border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 760px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+  /* API key bar */
+  #key-bar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--panel);
+    border-bottom: 1px solid var(--panel-border);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  #key-bar label { font-size: 0.85rem; font-weight: 600; color: var(--navy); }
+  #key-bar input {
+    flex: 1;
+    min-width: 220px;
+    padding: 8px 10px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 0.85rem;
+  }
+  button {
+    background: var(--navy);
+    color: white;
+    border: none;
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button:hover { background: var(--navy-dark); }
+  button.ghost {
+    background: white;
+    color: var(--navy);
+    border: 1px solid var(--navy);
+  }
+  button.ghost:hover { background: var(--panel); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #key-status { font-size: 0.85rem; font-weight: 600; white-space: nowrap; }
+  #key-status.ok { color: var(--good); }
+  #key-status.err { color: var(--bad); }
+  #key-status.idle { color: var(--muted); }
+
+  img.diagram { max-width: 100%; border: 1px solid var(--panel-border); border-radius: var(--radius); background: white; }
+
+  .kpi-tile {
+    background: var(--panel);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+  }
+  .kpi-tile .num { font-size: 1.6rem; font-weight: 700; color: var(--navy); }
+  .kpi-tile .label { font-size: 0.78rem; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--panel-border); }
+  th { color: var(--muted); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; }
+  code.key { font-family: monospace; font-size: 0.78rem; background: var(--panel); padding: 2px 5px; border-radius: 4px; }
+
+  form.action-form { display: flex; flex-direction: column; gap: 10px; }
+  form.action-form .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  form.action-form .field { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 140px; }
+  form.action-form label { font-size: 0.78rem; color: var(--muted); font-weight: 600; }
+  form.action-form input, form.action-form select {
+    padding: 7px 9px;
+    border: 1px solid var(--panel-border);
+    border-radius: 6px;
+    font-size: 0.85rem;
+  }
+  .lines-list { display: flex; flex-direction: column; gap: 6px; }
+  .lines-list .line-row { display: flex; gap: 8px; align-items: center; }
+  .lines-list .line-row input { flex: 1; }
+  .lines-list button.remove { background: none; color: var(--bad); border: 1px solid var(--bad); padding: 4px 8px; }
+
+  .result {
+    margin-top: 10px;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    display: none;
+  }
+  .result.show { display: block; }
+  .result.ok { background: #EAF6EE; border: 1px solid #BFE4CB; }
+  .result.err { background: #FBEAEA; border: 1px solid #F0C4C1; }
+  .result pre { white-space: pre-wrap; word-break: break-word; margin: 6px 0 0; font-size: 0.78rem; }
+  .result summary { cursor: pointer; color: var(--muted); font-size: 0.78rem; }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 20px;
+    background: var(--navy);
+    color: white;
+    vertical-align: middle;
+    margin-left: 8px;
+  }
+  .badge.public { background: var(--good); }
+
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.8rem;
+    padding: 30px 20px 50px;
+  }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div>
+    <h1>Bedding Franchise ERP/CRM</h1>
+    <div class="tagline">Production &middot; six sales channels &middot; accounting &mdash; one shared system of record</div>
+  </div>
+  <nav>
+    <a href="/docs" target="_blank">API reference (Swagger)</a>
+    <a href="https://github.com/SelenaG4/bedding-franchise-erp" target="_blank">GitHub</a>
+  </nav>
+</header>
+
+<div id="key-bar">
+  <label for="api-key-input">X-API-Key</label>
+  <input id="api-key-input" type="text" placeholder="Paste an API key, or use a demo key below" autocomplete="off" />
+  <button id="use-demo-admin" class="ghost" type="button">Use demo admin key</button>
+  <span id="key-status" class="idle">Not checked yet</span>
+</div>
+
+<main>
+
+  <section>
+    <h2>How this works</h2>
+    <p class="lead">
+      Everything below needs an API key in the bar above &mdash; run
+      <code>python scripts/seed.py</code> once to create demo accounts and print
+      an admin key plus one key per account. This demo deployment's admin key
+      defaults to <code class="key">dev-admin-key-change-me</code> unless the
+      <code>ADMIN_API_KEY</code> environment variable was set &mdash; safe to show
+      here since it's the same public fallback value visible in
+      <a href="https://github.com/SelenaG4/bedding-franchise-erp/blob/main/app/auth.py" target="_blank">app/auth.py</a>
+      on GitHub. A real deployment would set a real secret.
+    </p>
+    <img class="diagram" src="/static/roadmap.png" alt="Roadmap: seed for API keys, then Setup (admin) -> Produce (admin) -> Sell across 6 channels (account's own key, or admin) -> Get paid (admin) -> Review reports and planning tools (admin)." />
+  </section>
+
+  <section>
+    <h2>Dashboard <span class="badge">admin key</span></h2>
+    <p class="lead">Cross-department view: finished-goods stock, reusable fabric remnants, and outstanding receivables.</p>
+    <div id="dashboard-empty" class="card">Enter an admin key above to load the dashboard.</div>
+    <div id="dashboard-content" class="grid-3" style="display:none;"></div>
+  </section>
+
+  <section>
+    <h2>Sales channels <span class="badge public">public</span></h2>
+    <p class="lead">Each of the six channels has its own checkout procedure, packaging, and payment terms &mdash; enforced in the sales-order logic below, not just labeled.</p>
+    <div id="channels-content" class="card">Loading&hellip;</div>
+  </section>
+
+  <section>
+    <h2>Accounts <span class="badge">admin key</span></h2>
+    <p class="lead">Every account authenticates with its own key and can only see its own orders and receivables. Click "Use this key" to switch who you're acting as and see that scoping enforced live.</p>
+    <div id="accounts-empty" class="card">Enter an admin key above to list accounts.</div>
+    <div id="accounts-content" style="display:none;"></div>
+  </section>
+
+  <section>
+    <h2><span class="step-no">1</span>Run production <span class="badge">admin key</span></h2>
+    <p class="lead">Turns fabric into finished-goods stock. Leftover fabric becomes a reusable remnant roll automatically, or is recorded as scrap if too short to reuse.</p>
+    <div class="card">
+      <form class="action-form" id="form-production">
+        <div class="row">
+          <div class="field"><label>Product ID</label><input name="product_id" type="number" min="1" required /></div>
+          <div class="field"><label>Units to produce</label><input name="units_to_produce" type="number" min="1" required /></div>
+          <div class="field"><label>Fabric roll ID (optional)</label><input name="fabric_roll_id" type="number" min="1" /></div>
+        </div>
+        <div><button type="submit">Run production</button></div>
+      </form>
+      <div class="result" id="result-production"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="step-no">2</span>Place a sales order <span class="badge">your account key, or admin</span></h2>
+    <p class="lead">An account key can only place orders for itself &mdash; trying another account_id is rejected. Supermarket orders need a PO number; international orders need a customs declaration.</p>
+    <div class="card">
+      <form class="action-form" id="form-order">
+        <div class="row">
+          <div class="field"><label>Account ID</label><input name="account_id" type="number" min="1" required /></div>
+          <div class="field"><label>PO number (supermarket only)</label><input name="po_number" type="text" /></div>
+          <div class="field"><label>Customs declaration (international only)</label><input name="customs_declaration" type="text" /></div>
+        </div>
+        <div class="lines-list" id="order-lines">
+          <div class="line-row">
+            <input name="product_id" type="number" min="1" placeholder="Product ID" required />
+            <input name="quantity" type="number" min="1" placeholder="Quantity" required />
+          </div>
+        </div>
+        <div><button type="button" class="ghost" id="add-line">+ Add another line</button></div>
+        <div><button type="submit">Place order</button></div>
+      </form>
+      <div class="result" id="result-order"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="step-no">3</span>My orders &amp; receivables <span class="badge">your account key, or admin</span></h2>
+    <p class="lead">Shows exactly what the current API key is allowed to see &mdash; an account key sees only its own account; an admin key can look up any account ID.</p>
+    <div class="card">
+      <form class="action-form" id="form-lookup">
+        <div class="row">
+          <div class="field"><label>Account ID</label><input name="account_id" type="number" min="1" required /></div>
+        </div>
+        <div><button type="submit">View orders &amp; AR</button></div>
+      </form>
+      <div class="result" id="result-lookup"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="step-no">4</span>Plan a production batch <span class="badge">admin key</span></h2>
+    <p class="lead">
+      Compares the greedy one-roll-at-a-time heuristic against a jointly-optimal MILP assignment
+      (<a href="https://github.com/SelenaG4/bedding-franchise-erp/blob/main/app/optimization.py" target="_blank">app/optimization.py</a>)
+      for the same batch of pending production runs. Add a couple of rows with realistic quantities against your current fabric-roll pool to see a difference.
+    </p>
+    <div class="card">
+      <form class="action-form" id="form-plan">
+        <div class="lines-list" id="plan-lines">
+          <div class="line-row">
+            <input name="product_id" type="number" min="1" placeholder="Product ID" required />
+            <input name="units_to_produce" type="number" min="1" placeholder="Units to produce" required />
+            <input name="label" type="text" placeholder="Label (optional)" />
+          </div>
+        </div>
+        <div><button type="button" class="ghost" id="add-plan-line">+ Add another run</button></div>
+        <div><button type="submit">Compare plans</button></div>
+      </form>
+      <div class="result" id="result-plan"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="step-no">5</span>Reorder-point simulator <span class="badge">admin key</span></h2>
+    <p class="lead">
+      Monte Carlo recommendation bootstrapped from synthetic demand history, benchmarked against the textbook Normal-formula answer
+      (<a href="https://github.com/SelenaG4/bedding-franchise-erp/blob/main/app/simulation.py" target="_blank">app/simulation.py</a>).
+      Needs <code>data/demand_history.csv</code> to have rows for the product ID you enter.
+    </p>
+    <div class="card">
+      <form class="action-form" id="form-reorder">
+        <div class="row">
+          <div class="field"><label>Product ID</label><input name="product_id" type="number" min="1" required /></div>
+          <div class="field"><label>Lead time (days)</label><input name="lead_time_days" type="number" min="1" value="7" required /></div>
+          <div class="field"><label>Target service level</label><input name="target_service_level" type="number" min="0.5" max="0.999" step="0.01" value="0.95" required /></div>
+        </div>
+        <div><button type="submit">Recommend reorder point</button></div>
+      </form>
+      <div class="result" id="result-reorder"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Database schema</h2>
+    <p class="lead">Nine tables spanning production, sales, and accounting &mdash; fabric remnants link back to their parent roll, and finished-goods stock is always the sum of a movement ledger rather than a raw counter.</p>
+    <a href="/static/schema.png" target="_blank"><img class="diagram" src="/static/schema.png" alt="Entity-relationship diagram of the Account, Product, FabricRoll, ProductionRun, FinishedGoodsMovement, SalesOrder, SalesOrderLine, Invoice, and Payment tables and their relationships." /></a>
+  </section>
+
+</main>
+
+<footer>
+  Built as a portfolio project &mdash; see the
+  <a href="https://github.com/SelenaG4/bedding-franchise-erp" target="_blank">full source and README on GitHub</a>
+  for what's real vs. synthetic in this demo.
+</footer>
+
+<script>
+const keyInput = document.getElementById('api-key-input');
+const keyStatus = document.getElementById('key-status');
+const KEY_STORAGE = 'bedding_erp_api_key';
+
+function currentKey() { return keyInput.value.trim(); }
+
+function setStatus(text, cls) {
+  keyStatus.textContent = text;
+  keyStatus.className = cls;
+}
+
+async function api(path, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
+  const key = currentKey();
+  if (key) headers['X-API-Key'] = key;
+  if (options.body) headers['Content-Type'] = 'application/json';
+  const resp = await fetch(path, Object.assign({}, options, { headers }));
+  let data = null;
+  try { data = await resp.json(); } catch (e) { /* no body */ }
+  return { ok: resp.ok, status: resp.status, data };
+}
+
+function showResult(el, ok, summary, data) {
+  el.className = 'result show ' + (ok ? 'ok' : 'err');
+  const raw = data !== null ? JSON.stringify(data, null, 2) : '';
+  el.innerHTML = '<div>' + summary + '</div>' +
+    (raw ? '<details><summary>Raw response</summary><pre>' + raw.replace(/</g, '&lt;') + '</pre></details>' : '');
+}
+
+async function refreshKeyStatus() {
+  if (!currentKey()) { setStatus('Not checked yet', 'idle'); loadGatedSections(); return; }
+  const { ok, status, data } = await api('/accounts');
+  if (ok) {
+    setStatus('Admin key -- full access (' + (data.accounts ? data.accounts.length : 0) + ' accounts)', 'ok');
+  } else if (status === 403) {
+    setStatus('Account-scoped key -- can only act on its own account', 'ok');
+  } else {
+    setStatus('Invalid or missing key (' + status + ')', 'err');
+  }
+  loadGatedSections();
+}
+
+keyInput.addEventListener('change', refreshKeyStatus);
+document.getElementById('use-demo-admin').addEventListener('click', () => {
+  keyInput.value = 'dev-admin-key-change-me';
+  refreshKeyStatus();
+});
+
+// ---- Dashboard (admin) ----
+async function loadDashboard() {
+  const empty = document.getElementById('dashboard-empty');
+  const content = document.getElementById('dashboard-content');
+  if (!currentKey()) { empty.style.display = 'block'; content.style.display = 'none'; return; }
+  const { ok, data } = await api('/reports/summary');
+  if (!ok) { empty.style.display = 'block'; empty.textContent = 'This key cannot view system-wide reports (admin only).'; content.style.display = 'none'; return; }
+  empty.style.display = 'none';
+  content.style.display = 'grid';
+  const totalStock = Object.values(data.finished_goods_stock || {}).reduce((a, b) => a + b, 0);
+  const remnantTotal = (data.remnant_inventory || []).reduce((a, r) => a + r.remnant_meters_available, 0);
+  content.innerHTML = [
+    tile(totalStock, 'Finished-goods units in stock, across ' + Object.keys(data.finished_goods_stock || {}).length + ' SKUs'),
+    tile(remnantTotal.toFixed(1) + 'm', 'Reusable fabric remnant available'),
+    tile('CHF ' + data.total_outstanding_ar.toFixed(2), 'Outstanding receivables'),
+  ].join('');
+}
+function tile(num, label) {
+  return '<div class="kpi-tile"><div class="num">' + num + '</div><div class="label">' + label + '</div></div>';
+}
+
+// ---- Channels (public) ----
+async function loadChannels() {
+  const el = document.getElementById('channels-content');
+  const { ok, data } = await api('/channels');
+  if (!ok) { el.textContent = 'Could not load channel policies.'; return; }
+  let rows = Object.entries(data).map(([name, p]) => (
+    '<tr><td>' + name + '</td><td>' + p.payment_terms + '</td><td>' + p.packaging + '</td>' +
+    '<td>' + (p.requires_po_number ? 'PO number' : (p.requires_customs_docs ? 'Customs declaration' : '&mdash;')) + '</td>' +
+    '<td>' + (p.raises_invoice ? 'Yes' : 'No (internal transfer)') + '</td></tr>'
+  )).join('');
+  el.innerHTML = '<table><thead><tr><th>Channel</th><th>Terms</th><th>Packaging</th><th>Requires</th><th>Raises invoice</th></tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+// ---- Accounts (admin) ----
+async function loadAccounts() {
+  const empty = document.getElementById('accounts-empty');
+  const content = document.getElementById('accounts-content');
+  if (!currentKey()) { empty.style.display = 'block'; content.style.display = 'none'; return; }
+  const { ok, data } = await api('/accounts');
+  if (!ok) { empty.style.display = 'block'; empty.textContent = 'This key cannot list accounts (admin only) -- try "View orders & AR" below instead with your own account ID.'; content.style.display = 'none'; return; }
+  empty.style.display = 'none';
+  content.style.display = 'block';
+  let rows = data.accounts.map(a => (
+    '<tr><td>' + a.id + '</td><td>' + a.name + '</td><td>' + a.channel + '</td>' +
+    '<td><code class="key">' + a.api_key + '</code></td>' +
+    '<td><button type="button" class="ghost" data-key="' + a.api_key + '">Use this key</button></td></tr>'
+  )).join('');
+  content.innerHTML = '<div class="card"><table><thead><tr><th>ID</th><th>Name</th><th>Channel</th><th>API key</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+  content.querySelectorAll('button[data-key]').forEach(btn => {
+    btn.addEventListener('click', () => { keyInput.value = btn.getAttribute('data-key'); refreshKeyStatus(); });
+  });
+}
+
+function loadGatedSections() {
+  loadDashboard();
+  loadAccounts();
+}
+
+loadChannels();
+loadGatedSections();
+
+// ---- Production form ----
+document.getElementById('form-production').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const body = { product_id: Number(f.product_id.value), units_to_produce: Number(f.units_to_produce.value) };
+  if (f.fabric_roll_id.value) body.fabric_roll_id = Number(f.fabric_roll_id.value);
+  const { ok, data } = await api('/production-runs', { method: 'POST', body: JSON.stringify(body) });
+  const el = document.getElementById('result-production');
+  if (ok) {
+    showResult(el, true, 'Produced ' + data.units_produced + ' units, consumed ' + data.fabric_consumed_m.toFixed(1) + 'm of fabric. ' +
+      (data.remnant_roll_id ? 'Leftover kept as a new remnant roll (#' + data.remnant_roll_id + ').' : 'Leftover (' + data.scrapped_m.toFixed(1) + 'm) recorded as scrap.'), data);
+  } else {
+    showResult(el, false, 'Failed: ' + (data && data.detail ? JSON.stringify(data.detail) : 'see raw response'), data);
+  }
+  loadDashboard();
+});
+
+// ---- Order lines (dynamic rows) ----
+document.getElementById('add-line').addEventListener('click', () => {
+  const wrap = document.getElementById('order-lines');
+  const row = document.createElement('div');
+  row.className = 'line-row';
+  row.innerHTML = '<input name="product_id" type="number" min="1" placeholder="Product ID" required />' +
+    '<input name="quantity" type="number" min="1" placeholder="Quantity" required />' +
+    '<button type="button" class="remove">Remove</button>';
+  row.querySelector('.remove').addEventListener('click', () => row.remove());
+  wrap.appendChild(row);
+});
+
+document.getElementById('form-order').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const lines = Array.from(document.querySelectorAll('#order-lines .line-row')).map(row => ({
+    product_id: Number(row.querySelector('input[name=product_id]').value),
+    quantity: Number(row.querySelector('input[name=quantity]').value),
+  }));
+  const body = { account_id: Number(f.account_id.value), lines };
+  if (f.po_number.value) body.po_number = f.po_number.value;
+  if (f.customs_declaration.value) body.customs_declaration = f.customs_declaration.value;
+  const { ok, data } = await api('/sales-orders', { method: 'POST', body: JSON.stringify(body) });
+  const el = document.getElementById('result-order');
+  if (ok) {
+    showResult(el, true, 'Order #' + data.id + ' ' + data.status + ' on the ' + data.channel + ' channel. Packaging: ' + data.packaging + '. Total: CHF ' + data.total_value.toFixed(2) + '.', data);
+  } else {
+    showResult(el, false, 'Failed (' + JSON.stringify(data && data.detail) + ')', data);
+  }
+  loadDashboard();
+});
+
+// ---- Lookup form ----
+document.getElementById('form-lookup').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const accountId = Number(e.target.account_id.value);
+  const [ar, orders] = await Promise.all([
+    api('/accounts/' + accountId + '/outstanding-ar'),
+    api('/accounts/' + accountId + '/orders'),
+  ]);
+  const el = document.getElementById('result-lookup');
+  if (ar.ok && orders.ok) {
+    showResult(el, true, 'Outstanding AR: CHF ' + ar.data.outstanding_ar.toFixed(2) + '. ' + orders.data.orders.length + ' order(s) on file.',
+      { outstanding_ar: ar.data, orders: orders.data });
+  } else {
+    showResult(el, false, 'Access denied or account not found -- this key can only view its own account.', ar.data || orders.data);
+  }
+});
+
+// ---- Optimization plan ----
+document.getElementById('add-plan-line').addEventListener('click', () => {
+  const wrap = document.getElementById('plan-lines');
+  const row = document.createElement('div');
+  row.className = 'line-row';
+  row.innerHTML = '<input name="product_id" type="number" min="1" placeholder="Product ID" required />' +
+    '<input name="units_to_produce" type="number" min="1" placeholder="Units to produce" required />' +
+    '<input name="label" type="text" placeholder="Label (optional)" />' +
+    '<button type="button" class="remove">Remove</button>';
+  row.querySelector('.remove').addEventListener('click', () => row.remove());
+  wrap.appendChild(row);
+});
+
+document.getElementById('form-plan').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const pending_runs = Array.from(document.querySelectorAll('#plan-lines .line-row')).map(row => {
+    const label = row.querySelector('input[name=label]').value;
+    const out = {
+      product_id: Number(row.querySelector('input[name=product_id]').value),
+      units_to_produce: Number(row.querySelector('input[name=units_to_produce]').value),
+    };
+    if (label) out.label = label;
+    return out;
+  });
+  const { ok, data } = await api('/optimization/production-plan', { method: 'POST', body: JSON.stringify({ pending_runs }) });
+  const el = document.getElementById('result-plan');
+  if (ok) {
+    const pct = data.scrap_reduction_pct !== null ? data.scrap_reduction_pct.toFixed(1) + '%' : 'n/a (greedy already had zero scrap)';
+    showResult(el, true, 'Greedy scrap: ' + data.greedy.total_scrap_m.toFixed(2) + 'm. Optimal (MILP) scrap: ' + data.optimal.total_scrap_m.toFixed(2) + 'm. Reduction: ' + pct + '.', data);
+  } else {
+    showResult(el, false, 'Failed: ' + JSON.stringify(data && data.detail), data);
+  }
+});
+
+// ---- Reorder point ----
+document.getElementById('form-reorder').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const body = {
+    product_id: Number(f.product_id.value),
+    lead_time_days: Number(f.lead_time_days.value),
+    target_service_level: Number(f.target_service_level.value),
+  };
+  const { ok, data } = await api('/simulation/reorder-point', { method: 'POST', body: JSON.stringify(body) });
+  const el = document.getElementById('result-reorder');
+  if (ok) {
+    showResult(el, true, 'Recommended reorder point: ' + data.simulated_reorder_point + ' units (achieves ' +
+      (data.simulated_achieved_service_level * 100).toFixed(1) + '% service level). The textbook formula would say ' +
+      data.formula_reorder_point.toFixed(1) + ' units, achieving only ' + (data.formula_achieved_service_level * 100).toFixed(1) + '%.', data);
+  } else {
+    showResult(el, false, 'Failed: ' + JSON.stringify(data && data.detail) + ' -- make sure data/demand_history.csv has rows for this product ID.', data);
+  }
+});
+</script>
+
+</body>
+</html>
