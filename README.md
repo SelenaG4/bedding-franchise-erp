@@ -5,10 +5,19 @@ A small, working ERP unifying **Production**, **Multi-Channel Sales**, and
 of three disconnected spreadsheets or systems, which is the actual problem a
 manufacturer's first ERP/CRM rollout is usually solving.
 
+On top of day-to-day operations, two planning tools apply real operations-
+research methods to problems this same domain already surfaces: a
+mixed-integer program that jointly plans a batch of fabric cuts instead of
+committing to each one greedily (`app/optimization.py`), and a Monte Carlo
+simulation that derives reorder points from actual demand history instead of
+a textbook formula that assumes demand is Normally distributed
+(`app/simulation.py`). Both are described in detail below, including what
+each one is measured to actually improve.
+
 ## Why this exists
 
-A reconstruction of bedding franchising sales, production and inventory system. --
-it's a h demonstration of the kind of production/sales/accounting
+This is a new build (Aug 2026), not a reconstruction of any specific past system --
+it's a from-scratch demonstration of the kind of production/sales/accounting
 integration problem that comes up when leading an ERP/CRM implementation at a
 manufacturer: siloed departments, a real material-tracking problem (leftover
 fabric) that a generic "orders and inventory" schema wouldn't capture, and a
@@ -37,14 +46,12 @@ company-retail order still deducts finished-goods stock like any other order,
 but deliberately doesn't raise an invoice or touch accounts receivable, since
 moving stock to the company's own shop isn't a sale.
 
-Individual/walk-in customers each get their own `Account` row -- same as every
-other channel, own AR, own order history, no shared bucket. What's still
-missing is a real point-of-sale integration to create/look up that account
-automatically at checkout; until that exists,
-`services.get_or_create_individual_account()` (also exposed as
-`POST /accounts/individual/lookup-or-create`) is the manual equivalent, keyed
-on `contact_email` so a repeat customer doesn't get a duplicate account every
-visit.
+**Scope simplification, stated honestly:** individual/walk-in customers are
+modeled as one shared `Direct Customer Sales` account rather than one row per
+person -- a real POS-integrated system would track each transaction
+separately. That level of per-customer tracking wasn't needed to demonstrate
+the actual point of this project (channel-differentiated checkout logic), so
+it was left out rather than built halfway.
 
 ## The domain-specific part: fabric remnants
 
@@ -87,34 +94,6 @@ No order can exist in a half-fulfilled state. This was actually verified by a
 failing-then-passing test during development, not just asserted: see "a bug I hit"
 below.
 
-## Role-based auth
-
-Every request except `GET /health` and `GET /channels` requires an
-`X-API-Key` header. There are two roles, kept deliberately simple for what
-this system actually is (a small internal ERP, not a public multi-tenant
-product):
-
-- **`account`** -- each `Account` gets its own generated API key (returned
-  once, in plaintext, when the account is created). An account principal can
-  place its own orders and see its own `/accounts/{id}/orders` and
-  `/accounts/{id}/outstanding-ar` -- and gets a 403 on anyone else's, or on
-  the system-wide `/reports/*` endpoints.
-- **`admin`** -- one shared secret (`ADMIN_API_KEY` env var). Internal ERP
-  staff: manages master data (accounts/products/fabric rolls), records
-  production runs and payments, and can see everything, including on behalf
-  of any account.
-
-See `app/auth.py` for the full logic and `tests/test_auth.py` for the
-behavior this is meant to guarantee (missing/invalid key, an account reading
-its own vs. another's data, an account trying to place an order on another
-account's behalf, admin-only reports).
-
-This is API-key auth, not a full user/session system on purpose -- proportionate
-to a project this size, and enough to demonstrate the actual access-control
-requirement (each account is scoped to its own data). A real deployment would
-still want the admin role backed by individual staff accounts rather than one
-shared secret; see "What I'd do next."
-
 ## A bug I hit while building this
 
 Two of the tests originally asked for more units than the seeded fabric roll could
@@ -124,71 +103,142 @@ a bug in the service layer. Fixed by correcting the test fixtures, not the logic
 Kept as `tests/test_erp.py::test_production_run_rejects_insufficient_fabric` and
 the surrounding tests, which now pin this behavior deliberately.
 
-A second, more consequential one: a repo-structure cleanup commit
-("Fix repo structure: move project files to repo root") deleted the entire
-multi-channel implementation (`Account`, `SalesChannel`, `CHANNEL_POLICIES`,
-`ChannelRequirementError`, the whole six-channel `place_order()`) instead of
-moving it -- the working tree silently reverted to the single-channel,
-franchisee-only version from before that feature existed, while this README
-kept describing the multi-channel system as if it were live. Found via `git
-log`/`git show` against the object database (the multi-channel commit was
-still there, just orphaned from the working tree) and restored from the
-`Add multi-channel sales` commit rather than rewritten from scratch. Worth
-noting because it's exactly the kind of regression that's invisible unless
-you check the working tree against the docs, not just against the tests --
-the single-channel tests still passed the whole time.
+## Optimization: batch production planning (MILP)
+
+`allocate_fabric_roll()` (used by `run_production()`, above) makes the best
+*local* choice for one production run at a time -- exactly what happens if a
+planner submits runs one by one. In practice a planner queues a batch (a
+day's worth of pending runs) before committing to cuts, and assigning a batch
+jointly is a different, harder problem: N pending runs, M available rolls,
+one roll per run, minimizing total scrap. A sequence of locally-best picks
+can leave more scrap on the table than a plan that considers the whole batch
+at once.
+
+`app/optimization.py` solves the batch version as a 0/1 integer program --
+binary variables for every feasible (run, roll) pairing, one-roll-per-run and
+one-run-per-roll constraints, minimize total scrap -- via `scipy.optimize.milp`
+(the HiGHS solver), and separately reproduces the greedy heuristic's behavior
+on the identical input so the two can be compared directly, not just asserted
+to differ.
+
+**Proven, not just claimed:** `tests/test_optimization.py::test_greedy_is_myopic_optimal_beats_it`
+constructs a concrete two-run, two-roll scenario (roll lengths 5.0m and
+5.2m; runs needing 3.1m and 3.0m) where the greedy heuristic's first pick
+blocks the pairing that would leave zero scrap: greedy produces 1.9m of
+scrap, the MILP finds the zero-scrap pairing, a 100% reduction on that batch.
+A second test runs a larger 5-run/5-roll batch and asserts the general
+invariant that must always hold: the optimal plan's scrap total is never
+worse than greedy's, since greedy is itself one specific assignment the MILP
+is also free to choose.
+
+**Scope, stated honestly:** both planners work off a single static snapshot
+of the roll pool as it exists right now. Neither models a remnant created by
+run A becoming available to run B *within the same batch* -- that's a harder,
+multi-stage cutting-stock problem (see "What I'd do next"). Because both
+planners share that same assumption, the comparison between them is fair
+even though neither captures that further optimization opportunity. The
+objective is also "true waste" in this domain's own terms, not raw leftover
+meters: a leftover at or above `REMNANT_MIN_LENGTH_M` becomes a usable
+remnant roll (costs nothing in the objective); only leftover below that
+threshold -- genuine scrap -- is counted, matching the distinction
+`run_production()` already draws.
+
+```bash
+curl -X POST localhost:8000/optimization/production-plan -H "Content-Type: application/json" \
+  -d '{"pending_runs": [{"product_id": 1, "units_to_produce": 3, "label": "queue-1"},
+                          {"product_id": 2, "units_to_produce": 4, "label": "queue-2"}]}'
+# Returns both plans (assignments + total scrap) side by side, plus
+# scrap_reduction_m / scrap_reduction_pct. On the freshly-seeded 80m rolls
+# there's enough slack that both plans already hit zero scrap -- the gap only
+# shows up when the roll pool is tighter, which is exactly what the test
+# above is built to demonstrate deterministically.
+```
+
+## Simulation: reorder-point / safety-stock (Monte Carlo)
+
+The original "what I'd do next" list for this project said "add a
+reorder-point alert on finished-goods stock." A naive version of that is a
+single hand-picked number. `app/simulation.py` instead derives it: given a
+product's historical daily demand, it bootstraps thousands of simulated
+lead-time windows (resample `lead_time_days` historical daily observations
+with replacement and sum them, repeated `num_trials` times) and takes the
+reorder point as the quantile of that simulated distribution matching the
+target service level -- correct by construction for whatever shape the real
+demand data has, no assumption that demand is Normally distributed required.
+
+No real order history existed to derive this from (`scripts/seed.py` only
+creates starting accounts/products/rolls, not a sales history), so
+`scripts/generate_demand_history.py` generates one: 180 days x 18 SKUs of
+synthetic daily demand with weekday/weekend seasonality (most of this
+system's six channels are wholesale/B2B, so weekend demand is lighter) and a
+5% daily chance of a bulk/promo-order spike (2.5x-4x demand, the kind of
+thing a franchisee or supermarket partner placing a much larger-than-usual
+order actually looks like). That makes the demand distribution right-skewed
+-- not Normal -- on purpose, to test the thing this feature is actually
+for: does the simulation-based recommendation hold up where a textbook
+formula wouldn't?
+
+**Measured, on this generated history:** `scripts/run_reorder_point_analysis.py`
+runs the simulation for all 18 SKUs and also scores the textbook closed-form
+answer (`mean + z * std`, assuming Normal demand) against the *same*
+simulated trials. Every one of the 18 SKUs shows the formula falling short of
+the 95% target -- average **1.61 percentage points** of undercoverage, worst
+case **3.18pp** (a low-volume SKU where the discreteness of small-count
+demand makes a fraction-of-a-unit difference in the reorder point swing the
+achieved service level noticeably). `tests/test_simulation.py::test_formula_undercoverages_on_right_skewed_spiky_demand`
+pins this as a regression test on a synthetic spiky demand series, so it's
+not just true of one dataset generated once.
+
+![Reorder point: simulated recommendation (green) vs. the Normal-formula recommendation (red, dashed), against the actual simulated 7-day demand distribution for BED-009 -- the formula sits inside the distribution's body while the simulated point sits at the true 95th percentile](docs/reorder_point_simulation.png)
+
+```bash
+python scripts/generate_demand_history.py       # writes data/demand_history.csv
+python scripts/run_reorder_point_analysis.py     # writes data/reorder_point_recommendations.csv + the chart above
+
+curl -X POST localhost:8000/simulation/reorder-point -H "Content-Type: application/json" \
+  -d '{"product_id": 9, "lead_time_days": 7, "target_service_level": 0.95}'
+```
 
 ## Running it
 
 ```bash
 pip install -r requirements.txt
-export ADMIN_API_KEY=some-secret-you-choose   # see "Role-based auth" above
 uvicorn app.main:app --reload
-python scripts/seed.py     # 9 accounts across all 6 channels, 18 SKUs, 9 starting rolls
-                            # -- prints each account's id + api_key, and the admin key
+python scripts/seed.py     # 8 accounts across all 6 channels, 18 SKUs, 9 starting rolls
+python scripts/generate_demand_history.py   # synthetic demand history, needed for /simulation/reorder-point
 ```
 
-Try the full loop (swap in the api_key values `seed.py` printed for you):
+Try the full loop:
 
 ```bash
-ADMIN="X-API-Key: some-secret-you-choose"
-
-# Turn fabric into finished goods (admin: production is a staff operation)
-curl -X POST localhost:8000/production-runs -H "$ADMIN" -H "Content-Type: application/json" \
+# Turn fabric into finished goods
+curl -X POST localhost:8000/production-runs -H "Content-Type: application/json" \
   -d '{"product_id": 1, "units_to_produce": 5}'
 
-# See how each channel's checkout procedure differs -- no auth needed, this is policy not data
+# See how each channel's checkout procedure differs
 curl localhost:8000/channels
 
 # A supermarket order without a PO number is rejected (422) -- no order created
-curl -X POST localhost:8000/sales-orders -H "$ADMIN" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
   -d '{"account_id": 6, "lines": [{"product_id": 1, "quantity": 1}]}'
 
 # ...with a PO number, it's confirmed and palletized
-curl -X POST localhost:8000/sales-orders -H "$ADMIN" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
   -d '{"account_id": 6, "lines": [{"product_id": 1, "quantity": 1}], "po_number": "PO-1001"}'
 
 # A company-retail order moves stock but raises no invoice
-curl -X POST localhost:8000/sales-orders -H "$ADMIN" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
   -d '{"account_id": 4, "lines": [{"product_id": 1, "quantity": 1}]}'
 
 # Record a payment against an invoice
-curl -X POST localhost:8000/invoices/1/payments -H "$ADMIN" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/invoices/1/payments -H "Content-Type: application/json" \
   -d '{"amount": 50}'
 
-# The cross-department view: finished-goods stock, remnant fabric, total AR (admin only)
-curl -H "$ADMIN" localhost:8000/reports/summary
+# The cross-department view: finished-goods stock, remnant fabric, total AR
+curl localhost:8000/reports/summary
 
-# Revenue and order count by channel (admin only)
-curl -H "$ADMIN" localhost:8000/reports/sales-by-channel
-
-# A walk-in customer, looked up/created by email (the manual stand-in for a POS integration)
-curl -X POST "localhost:8000/accounts/individual/lookup-or-create?contact_email=new.customer@example.com&name=Walk-in:%20New%20Customer&location=Zurich" \
-  -H "$ADMIN"
-
-# An account can see its own orders and AR -- but gets a 403 on another account's, or on /reports/*
-curl -H "X-API-Key: <that account's own key>" localhost:8000/accounts/8/orders
-curl -H "X-API-Key: <that account's own key>" localhost:8000/accounts/8/outstanding-ar
+# Revenue and order count by channel -- shows company-retail transfers alongside real sales
+curl localhost:8000/reports/sales-by-channel
 ```
 
 Measured on this machine: production run + sales order + summary report each
@@ -198,23 +248,20 @@ cost here is transactional correctness, not latency.
 ### Tests
 
 ```bash
-pytest tests/ -v   # 21 passed
+pytest tests/ -v   # 24 passed
 ```
 
-`tests/test_erp.py` (11 tests, pure service-layer, no auth involved): remnant
-creation vs. scrap-below-threshold, remnant-first allocation, insufficient-fabric
-rejection (no partial stock change), atomic order rejection on insufficient
-finished-goods stock, payment/overpayment handling, and the three
-channel-specific behaviors (PO-number requirement, customs-declaration
-requirement, and company-retail orders skipping invoicing).
-
-`tests/test_auth.py` (10 tests, HTTP-level via FastAPI's TestClient): missing/
-invalid API key rejected, an account reading its own vs. another account's
-orders/AR (200 vs. 403), an account trying to place an order on another
-account's behalf (403), admin seeing any account's data and the system-wide
-reports, an account being blocked from those same reports, two individual/
-walk-in accounts never sharing AR or order history, and
-`lookup-or-create` being idempotent per `contact_email`.
+Covers: remnant creation vs. scrap-below-threshold, remnant-first allocation,
+insufficient-fabric rejection (no partial stock change), atomic order rejection
+on insufficient finished-goods stock, payment/overpayment handling, and the
+three channel-specific behaviors (PO-number requirement, customs-declaration
+requirement, and company-retail orders skipping invoicing) -- plus, for the two
+planning tools: the constructed scenario proving the MILP batch plan beats
+greedy, the invariant that it's never worse across a larger randomized batch,
+correct scrap accounting at the remnant-threshold boundary, reproducibility of
+the Monte Carlo simulation under a fixed seed, the achieved-service-level
+correctness property of the simulated reorder point, and the formula-vs-
+simulation undercoverage finding on a synthetic right-skewed demand series.
 
 ### Docker
 
@@ -237,16 +284,15 @@ Swagger UI to try every endpoint above directly in the browser.
 
 - Move off SQLite to Postgres for real concurrent-write safety (SQLite's fine for a
   demo, not for multiple channels writing at once).
-- Add a reorder-point alert on finished-goods stock, mirroring the remnant-tracking
-  idea: flag SKUs below a threshold the same way remnants are flagged.
-- Replace the single shared `ADMIN_API_KEY` with a real staff/user table --
-  right now every internal user is indistinguishable from every other admin,
-  which is fine for a demo and not fine for a real deployment (no per-staff
-  audit trail, no way to revoke one person's access).
-- Wire `services.get_or_create_individual_account()` up to an actual
-  point-of-sale system instead of the manual/API-triggered lookup -- the data
-  model and access control are ready for it; the integration itself doesn't
-  exist yet because there's no POS system in this project to integrate with.
-- API keys are returned once in plaintext and stored in the DB as plain text
-  columns -- fine for a demo, but a real system would hash them at rest
-  (like passwords) and support rotation/revocation.
+- Extend the batch production planner to model intra-batch remnant chaining
+  (a remnant created by one run in the batch becoming available to a later
+  run in the same batch) -- a genuinely harder multi-stage cutting-stock
+  problem, deliberately out of scope for the current static-snapshot MILP
+  (see "Optimization" above).
+- Replace the synthetic demand history with real order history once there is
+  any, and wire the reorder-point recommendation into an actual low-stock
+  alert on `/reports/summary` instead of a separate on-demand endpoint.
+- Add role-based auth so each account can only see their own orders/AR, not the
+  whole system.
+- Track individual/walk-in customers as their own accounts instead of one shared
+  bucket, once there's an actual POS integration driving that channel.

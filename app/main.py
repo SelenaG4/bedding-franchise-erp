@@ -7,31 +7,29 @@ against one shared system of record instead of three disconnected
 spreadsheets or systems.
 
 Run locally:
-    export ADMIN_API_KEY=some-secret-you-choose   # see app/auth.py
     uvicorn app.main:app --reload
     python scripts/seed.py       # loads sample accounts, products, fabric rolls
-                                  # -- prints each account's id + api_key
 
 Then try, in order:
     POST /production-runs   -- turn a fabric roll into finished-goods stock
     POST /sales-orders      -- an order through any of the six channels
     POST /invoices/{id}/payments
-    GET  /reports/summary   -- the cross-department view (admin only)
-    GET  /reports/sales-by-channel (admin only)
-    GET  /accounts/{id}/orders          -- an account's own orders
-    GET  /accounts/{id}/outstanding-ar  -- an account's own AR
+    GET  /reports/summary   -- the cross-department view
+    GET  /reports/sales-by-channel
 
-Every request except GET /health and GET /channels requires an X-API-Key
-header -- either an account's own key (self-service, scoped to that account
-only) or the admin key (internal staff, sees everything). See app/auth.py.
+Two planning tools, on top of the day-to-day operations above:
+    POST /optimization/production-plan  -- batch fabric-cutting plan: greedy
+                                            heuristic vs. MILP-optimal, compared
+    POST /simulation/reorder-point      -- Monte Carlo reorder-point/safety-stock
+                                            recommendation vs. the textbook formula
 """
 from __future__ import annotations
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app import auth, services
+from app import optimization, services, simulation
 from app.db import get_session, init_db
 from app.models import Account, FabricRoll, Product, SalesChannel
 
@@ -51,10 +49,7 @@ def db() -> Session:
     return get_session()
 
 
-ApiKeyHeader = Header(default=None, alias="X-API-Key")
-
-
-# ---- setup / master data (admin only -- internal ERP staff manage master data) --
+# ---- setup / master data -------------------------------------------------
 
 
 class AccountIn(BaseModel):
@@ -66,42 +61,17 @@ class AccountIn(BaseModel):
 
 
 @app.post("/accounts")
-def create_account(payload: AccountIn, x_api_key: str | None = ApiKeyHeader) -> dict:
+def create_account(payload: AccountIn) -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         a = Account(**payload.model_dump())
         session.add(a)
         session.commit()
-        # api_key is only ever returned in plaintext here, at creation --
-        # same convention as any real API-key-issuing system.
-        return {"id": a.id, "name": a.name, "channel": a.channel.value, "api_key": a.api_key}
-
-
-@app.post("/accounts/individual/lookup-or-create")
-def lookup_or_create_individual_account(
-    contact_email: str, name: str, location: str, x_api_key: str | None = ApiKeyHeader
-) -> dict:
-    """The manual stand-in for a POS integration (see services.
-    get_or_create_individual_account): a walk-in customer gets their own
-    persistent account keyed on contact_email instead of one shared bucket.
-    Admin-only for now -- in a real deployment, the POS terminal would call
-    this with its own service credential rather than a customer's key, since
-    a first-time customer doesn't have one yet."""
-    with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
-        account = services.get_or_create_individual_account(session, contact_email, name, location)
-        return {
-            "id": account.id,
-            "name": account.name,
-            "contact_email": account.contact_email,
-            "api_key": account.api_key,
-        }
+        return {"id": a.id, "name": a.name, "channel": a.channel.value}
 
 
 @app.get("/channels")
 def list_channels() -> dict:
-    """The checkout procedure and packaging for each sales channel. Public --
-    this is policy, not account data."""
+    """The checkout procedure and packaging for each sales channel."""
     return {
         channel.value: {
             "payment_terms": policy.payment_terms,
@@ -123,9 +93,8 @@ class ProductIn(BaseModel):
 
 
 @app.post("/products")
-def create_product(payload: ProductIn, x_api_key: str | None = ApiKeyHeader) -> dict:
+def create_product(payload: ProductIn) -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         p = Product(**payload.model_dump())
         session.add(p)
         session.commit()
@@ -140,9 +109,8 @@ class FabricRollIn(BaseModel):
 
 
 @app.post("/fabric-rolls")
-def create_fabric_roll(payload: FabricRollIn, x_api_key: str | None = ApiKeyHeader) -> dict:
+def create_fabric_roll(payload: FabricRollIn) -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         roll = FabricRoll(
             roll_code=payload.roll_code,
             fabric_type=payload.fabric_type,
@@ -156,7 +124,7 @@ def create_fabric_roll(payload: FabricRollIn, x_api_key: str | None = ApiKeyHead
         return {"id": roll.id, "roll_code": roll.roll_code}
 
 
-# ---- production (admin only) -----------------------------------------------
+# ---- production -----------------------------------------------------------
 
 
 class ProductionRunIn(BaseModel):
@@ -166,9 +134,8 @@ class ProductionRunIn(BaseModel):
 
 
 @app.post("/production-runs")
-def create_production_run(payload: ProductionRunIn, x_api_key: str | None = ApiKeyHeader) -> dict:
+def create_production_run(payload: ProductionRunIn) -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         try:
             run = services.run_production(
                 session, payload.product_id, payload.units_to_produce, payload.fabric_roll_id
@@ -185,7 +152,7 @@ def create_production_run(payload: ProductionRunIn, x_api_key: str | None = ApiK
         }
 
 
-# ---- sales across all channels ---------------------------------------------
+# ---- sales across all channels --------------------------------------------
 
 
 class OrderLineIn(BaseModel):
@@ -201,14 +168,8 @@ class SalesOrderIn(BaseModel):
 
 
 @app.post("/sales-orders")
-def create_sales_order(payload: SalesOrderIn, x_api_key: str | None = ApiKeyHeader) -> dict:
+def create_sales_order(payload: SalesOrderIn) -> dict:
     with db() as session:
-        # Self-service: an account can place its own orders but not order on
-        # behalf of another account. Admin can place an order for anyone
-        # (e.g. staff taking a phone/walk-in order on a customer's behalf).
-        principal = auth.get_principal(session, x_api_key)
-        auth.ensure_account_access(principal, payload.account_id)
-
         lines = [services.OrderLineRequest(l.product_id, l.quantity) for l in payload.lines]
         try:
             order = services.place_order(
@@ -236,7 +197,7 @@ def create_sales_order(payload: SalesOrderIn, x_api_key: str | None = ApiKeyHead
         }
 
 
-# ---- accounting (admin only -- staff reconcile incoming payments) ---------
+# ---- accounting -------------------------------------------------------
 
 
 class PaymentIn(BaseModel):
@@ -244,9 +205,8 @@ class PaymentIn(BaseModel):
 
 
 @app.post("/invoices/{invoice_id}/payments")
-def pay_invoice(invoice_id: int, payload: PaymentIn, x_api_key: str | None = ApiKeyHeader) -> dict:
+def pay_invoice(invoice_id: int, payload: PaymentIn) -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         try:
             invoice = services.record_payment(session, invoice_id, payload.amount)
         except ValueError as e:
@@ -254,13 +214,12 @@ def pay_invoice(invoice_id: int, payload: PaymentIn, x_api_key: str | None = Api
         return {"invoice_id": invoice.id, "balance": invoice.balance}
 
 
-# ---- reporting: the cross-department view (admin only -- system-wide) -----
+# ---- reporting: the cross-department view ---------------------------------
 
 
 @app.get("/reports/summary")
-def summary(x_api_key: str | None = ApiKeyHeader) -> dict:
+def summary() -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         products = session.query(Product).all()
         finished_goods = {
             p.sku: services.finished_goods_stock(session, p.id) for p in products
@@ -273,42 +232,114 @@ def summary(x_api_key: str | None = ApiKeyHeader) -> dict:
 
 
 @app.get("/reports/sales-by-channel")
-def sales_by_channel(x_api_key: str | None = ApiKeyHeader) -> dict:
+def sales_by_channel() -> dict:
     with db() as session:
-        auth.ensure_admin(auth.get_principal(session, x_api_key))
         return {"channels": services.sales_by_channel(session)}
 
 
-# ---- an account's own data -- the role-based-auth boundary ----------------
-
-
 @app.get("/accounts/{account_id}/outstanding-ar")
-def account_ar(account_id: int, x_api_key: str | None = ApiKeyHeader) -> dict:
+def account_ar(account_id: int) -> dict:
     with db() as session:
-        principal = auth.get_principal(session, x_api_key)
-        auth.ensure_account_access(principal, account_id)
         return {"account_id": account_id, "outstanding_ar": services.outstanding_ar(session, account_id)}
 
 
-@app.get("/accounts/{account_id}/orders")
-def account_orders(account_id: int, x_api_key: str | None = ApiKeyHeader) -> dict:
+# ---- optimization: batch production planning ------------------------------
+
+
+class PendingRunIn(BaseModel):
+    product_id: int
+    units_to_produce: int = Field(gt=0)
+    label: str | None = None
+
+
+class ProductionPlanIn(BaseModel):
+    pending_runs: list[PendingRunIn]
+
+
+def _serialize_plan(plan: optimization.BatchPlanResult) -> dict:
+    return {
+        "method": plan.method,
+        "assignments": [
+            {
+                "run_label": a.run_label,
+                "product_id": a.product_id,
+                "units_to_produce": a.units_to_produce,
+                "meters_needed": a.meters_needed,
+                "roll_id": a.roll_id,
+                "roll_code": a.roll_code,
+                "leftover_m": a.leftover_m,
+                "is_scrap": a.is_scrap,
+            }
+            for a in plan.assignments
+        ],
+        "unassignable": plan.unassignable,
+        "total_scrap_m": plan.total_scrap_m,
+        "total_leftover_m": plan.total_leftover_m,
+    }
+
+
+@app.post("/optimization/production-plan")
+def production_plan(payload: ProductionPlanIn) -> dict:
+    """Compares the greedy one-at-a-time allocation heuristic against a
+    jointly-optimal MILP assignment for the same batch of pending production
+    runs against the current fabric-roll pool. See app/optimization.py for
+    the full method and its stated scope."""
     with db() as session:
-        principal = auth.get_principal(session, x_api_key)
-        auth.ensure_account_access(principal, account_id)
-        orders = services.orders_for_account(session, account_id)
+        pending = [
+            optimization.PendingRun(pr.product_id, pr.units_to_produce, pr.label or "")
+            for pr in payload.pending_runs
+        ]
+        try:
+            comparison = optimization.compare_plans(session, pending)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         return {
-            "account_id": account_id,
-            "orders": [
-                {
-                    "id": o.id,
-                    "status": o.status.value,
-                    "channel": o.channel.value,
-                    "order_date": o.order_date.isoformat(),
-                    "total_value": o.total_value,
-                }
-                for o in orders
-            ],
+            "greedy": _serialize_plan(comparison.greedy),
+            "optimal": _serialize_plan(comparison.optimal),
+            "scrap_reduction_m": comparison.scrap_reduction_m,
+            "scrap_reduction_pct": comparison.scrap_reduction_pct,
         }
+
+
+# ---- simulation: reorder-point / safety-stock recommendation --------------
+
+
+class ReorderPointIn(BaseModel):
+    product_id: int
+    lead_time_days: int = Field(gt=0)
+    target_service_level: float = Field(default=0.95, gt=0, lt=1)
+    num_trials: int = Field(default=5000, gt=0, le=200_000)
+
+
+@app.post("/simulation/reorder-point")
+def reorder_point(payload: ReorderPointIn) -> dict:
+    """Monte Carlo reorder-point/safety-stock recommendation, bootstrapped
+    from data/demand_history.csv (see scripts/generate_demand_history.py),
+    compared against the textbook Normal-formula answer on the same
+    simulated trials. See app/simulation.py for the full method."""
+    try:
+        rec = simulation.recommend_reorder_point(
+            payload.product_id, payload.lead_time_days, payload.target_service_level, payload.num_trials
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "sku": rec.sku,
+        "lead_time_days": rec.lead_time_days,
+        "target_service_level": rec.target_service_level,
+        "num_historical_days": rec.num_historical_days,
+        "num_trials": rec.num_trials,
+        "mean_lead_time_demand": rec.mean_lead_time_demand,
+        "std_lead_time_demand": rec.std_lead_time_demand,
+        "simulated_reorder_point": rec.simulated_reorder_point,
+        "simulated_safety_stock": rec.simulated_safety_stock,
+        "simulated_achieved_service_level": rec.simulated_achieved_service_level,
+        "formula_reorder_point": rec.formula_reorder_point,
+        "formula_achieved_service_level": rec.formula_achieved_service_level,
+        "formula_undercoverage_pct": rec.formula_undercoverage_pct,
+    }
 
 
 @app.get("/health")
