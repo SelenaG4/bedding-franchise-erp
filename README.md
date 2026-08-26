@@ -14,13 +14,6 @@ a textbook formula that assumes demand is Normally distributed
 (`app/simulation.py`). Both are described in detail below, including what
 each one is measured to actually improve.
 
-**Try it live:** open **https://bedding-franchise-erp.onrender.com/** for a
-guided landing page -- no setup, no reading curl commands. It embeds the user
-roadmap and database diagrams referenced throughout this README, hands you a
-working API key on the page itself, and lets you run every flow below (a
-production run, a multi-channel sales order, the two planning tools) as
-actual form submissions against the live database.
-
 ## Why this exists
 
 A bedding manufacturer that starts out selling through one or two channels
@@ -36,60 +29,9 @@ stores -- can't be forced into one uniform "add to cart" flow.
 
 This is the core database and business-logic system built for exactly that
 expansion: one shared system of record spanning production, all six sales
-channels, and accounting, with fabric-remnant tracking, role-based access
-per account, and each channel's own rules built into the schema and logic
-itself, not bolted on after the fact.
-
-## How it works: user roadmap
-
-Every operation in this system requires an API key -- either the one shared
-admin key, or an account's own key -- so the roadmap below starts there. Six
-steps, admin-only steps and self-service steps marked separately:
-
-![User roadmap: seed the database and get API keys, then Setup (admin) -- create products/rolls/accounts, Produce (admin) -- turn fabric into finished goods with leftover auto-tracked as remnant or scrap, Sell (account's own key or admin) -- place an order on any of the 6 channels, an account key only ever sees its own orders and AR, Get paid (admin) -- record a payment against an invoice, Review (admin) -- summary report plus the two planning tools comparing MILP vs. greedy and Monte Carlo vs. the textbook formula](docs/roadmap.png)
-
-## Database layout
-
-Nine tables, all defined in `app/models.py`. The diagram below (not just a
-text list of columns) is the fastest way to see how production, all six
-sales channels, and accounting actually connect -- including the two
-relationships that are easy to miss in a text schema: a fabric roll can be
-the parent of its own leftover remnant (`FABRIC_ROLL` self-reference), and
-every account -- including individual walk-in customers -- carries its own
-`api_key`, which is exactly what the role-based auth below is built on.
-
-![Database ER diagram: ACCOUNT (with api_key for role-based auth) placing SALES_ORDER across six channels, each order made of SALES_ORDER_LINE rows against PRODUCT, PRODUCT consuming FABRIC_ROLL via PRODUCTION_RUN which also records FINISHED_GOODS_MOVEMENT, FABRIC_ROLL self-referencing as leftover becomes a remnant of another roll, and SALES_ORDER raising an INVOICE which accumulates PAYMENT rows](docs/schema.png)
-
-## Role-based access: admin vs. account keys
-
-Every account gets its own API key at creation (`Account.api_key`, printed
-once by `scripts/seed.py` or returned in the API response). There are
-exactly two roles, enforced at the API boundary in `app/auth.py` +
-`app/main.py` -- the service layer in `app/services.py` stays pure business
-logic with no idea who's asking:
-
-- **Admin** (`ADMIN_API_KEY`, one shared secret): full access -- setup,
-  production, reporting, both planning tools, and placing an order on
-  *any* account's behalf.
-- **Account** (a franchisee, a supermarket partner, an individual walk-in
-  customer -- each is its own account, not a shared bucket): can place its
-  own orders and look up its own orders/AR, and nothing else. Trying to
-  view another account's data returns `403 Forbidden`; a missing or unknown
-  key returns `401 Unauthorized`.
-
-This is demoed live, not just asserted: the landing page lets you switch the
-active key from admin to any seeded account's own key and watch the
-dashboard and "my orders" lookup restrict themselves in real time, including
-the 403 you get from trying another account's ID.
-
-**Stated honestly:** the admin role is one shared secret rather than
-individual staff logins, since there's no staff-user table in this system
-yet (see "What I'd do next"). On the public live demo, the admin key shown
-is the same insecure default fallback (`dev-admin-key-change-me`) that's
-already visible in `app/auth.py` on GitHub -- fine for a demo, but a real
-deployment should set its own `ADMIN_API_KEY` environment variable (any
-host that lets you set environment variables, including Render, supports
-this out of the box).
+channels, and accounting, with fabric-remnant tracking and each channel's
+own rules built into the schema and logic itself, not bolted on after the
+fact.
 
 ## Six sales channels, six checkout procedures
 
@@ -113,12 +55,12 @@ company-retail order still deducts finished-goods stock like any other order,
 but deliberately doesn't raise an invoice or touch accounts receivable, since
 moving stock to the company's own shop isn't a sale.
 
-**Individual/walk-in customers get their own account, too.** Each one is a
-real `Account` row (channel `INDIVIDUAL`) with its own order history, AR, and
-API key -- not a shared bucket every walk-in sale gets dumped into.
-`POST /accounts/individual/lookup-or-create` looks one up by email or creates
-it on the fly, which is what a POS integration would call at checkout; the
-seed data creates two by hand for demo purposes.
+**Scope simplification, stated honestly:** individual/walk-in customers are
+modeled as one shared `Direct Customer Sales` account rather than one row per
+person -- a real POS-integrated system would track each transaction
+separately. That level of per-customer tracking wasn't needed to demonstrate
+the actual point of this project (channel-differentiated checkout logic), so
+it was left out rather than built halfway.
 
 ## The domain-specific part: fabric remnants
 
@@ -211,7 +153,7 @@ threshold -- genuine scrap -- is counted, matching the distinction
 `run_production()` already draws.
 
 ```bash
-curl -X POST localhost:8000/optimization/production-plan -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/optimization/production-plan -H "Content-Type: application/json" \
   -d '{"pending_runs": [{"product_id": 1, "units_to_produce": 3, "label": "queue-1"},
                           {"product_id": 2, "units_to_produce": 4, "label": "queue-2"}]}'
 # Returns both plans (assignments + total scrap) side by side, plus
@@ -262,7 +204,7 @@ not just true of one dataset generated once.
 python scripts/generate_demand_history.py       # writes data/demand_history.csv
 python scripts/run_reorder_point_analysis.py     # writes data/reorder_point_recommendations.csv + the chart above
 
-curl -X POST localhost:8000/simulation/reorder-point -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/simulation/reorder-point -H "Content-Type: application/json" \
   -d '{"product_id": 9, "lead_time_days": 7, "target_service_level": 0.95}'
 ```
 
@@ -271,53 +213,41 @@ curl -X POST localhost:8000/simulation/reorder-point -H "X-API-Key: $ADMIN_KEY" 
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload
-python scripts/seed.py     # 9 accounts across all 6 channels, 18 SKUs, 9 starting rolls
-                            # -- prints the admin key and every account's own key, you need these next
+python scripts/seed.py     # 8 accounts across all 6 channels, 18 SKUs, 9 starting rolls
 python scripts/generate_demand_history.py   # synthetic demand history, needed for /simulation/reorder-point
 ```
 
-Then open **http://localhost:8000/** for the guided landing page (paste in
-one of the keys `seed.py` just printed), or use the API directly -- almost
-every endpoint now requires an `X-API-Key` header (see "Role-based access"
-above); only `GET /channels` and `GET /health` are public.
-
-Try the full loop (`$ADMIN_KEY` = whatever `seed.py` printed as the admin key):
+Try the full loop:
 
 ```bash
-# Turn fabric into finished goods -- admin only
-curl -X POST localhost:8000/production-runs -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+# Turn fabric into finished goods
+curl -X POST localhost:8000/production-runs -H "Content-Type: application/json" \
   -d '{"product_id": 1, "units_to_produce": 5}'
 
-# See how each channel's checkout procedure differs -- public, no key needed
+# See how each channel's checkout procedure differs
 curl localhost:8000/channels
 
 # A supermarket order without a PO number is rejected (422) -- no order created
-curl -X POST localhost:8000/sales-orders -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
   -d '{"account_id": 6, "lines": [{"product_id": 1, "quantity": 1}]}'
 
 # ...with a PO number, it's confirmed and palletized
-curl -X POST localhost:8000/sales-orders -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
   -d '{"account_id": 6, "lines": [{"product_id": 1, "quantity": 1}], "po_number": "PO-1001"}'
 
 # A company-retail order moves stock but raises no invoice
-curl -X POST localhost:8000/sales-orders -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+curl -X POST localhost:8000/sales-orders -H "Content-Type: application/json" \
   -d '{"account_id": 4, "lines": [{"product_id": 1, "quantity": 1}]}'
 
-# Record a payment against an invoice -- admin only
-curl -X POST localhost:8000/invoices/1/payments -H "X-API-Key: $ADMIN_KEY" -H "Content-Type: application/json" \
+# Record a payment against an invoice
+curl -X POST localhost:8000/invoices/1/payments -H "Content-Type: application/json" \
   -d '{"amount": 50}'
 
-# The cross-department view: finished-goods stock, remnant fabric, total AR -- admin only
-curl localhost:8000/reports/summary -H "X-API-Key: $ADMIN_KEY"
+# The cross-department view: finished-goods stock, remnant fabric, total AR
+curl localhost:8000/reports/summary
 
-# Revenue and order count by channel -- admin only
-curl localhost:8000/reports/sales-by-channel -H "X-API-Key: $ADMIN_KEY"
-
-# An account can look up its own orders/AR with its own key...
-curl localhost:8000/accounts/6/orders -H "X-API-Key: $MIGROS_ACCOUNT_KEY"
-
-# ...but gets a 403 trying another account's, even though the URL is well-formed
-curl localhost:8000/accounts/4/orders -H "X-API-Key: $MIGROS_ACCOUNT_KEY"
+# Revenue and order count by channel -- shows company-retail transfers alongside real sales
+curl localhost:8000/reports/sales-by-channel
 ```
 
 Measured on this machine: production run + sales order + summary report each
@@ -327,24 +257,20 @@ cost here is transactional correctness, not latency.
 ### Tests
 
 ```bash
-pytest tests/ -v   # 37 passed
+pytest tests/ -v   # 24 passed
 ```
 
 Covers: remnant creation vs. scrap-below-threshold, remnant-first allocation,
 insufficient-fabric rejection (no partial stock change), atomic order rejection
-on insufficient finished-goods stock, payment/overpayment handling, the
+on insufficient finished-goods stock, payment/overpayment handling, and the
 three channel-specific behaviors (PO-number requirement, customs-declaration
-requirement, and company-retail orders skipping invoicing), the two planning
-tools (the constructed scenario proving the MILP batch plan beats greedy, the
-invariant that it's never worse across a larger randomized batch, correct
-scrap accounting at the remnant-threshold boundary, reproducibility of the
-Monte Carlo simulation under a fixed seed, the achieved-service-level
+requirement, and company-retail orders skipping invoicing) -- plus, for the two
+planning tools: the constructed scenario proving the MILP batch plan beats
+greedy, the invariant that it's never worse across a larger randomized batch,
+correct scrap accounting at the remnant-threshold boundary, reproducibility of
+the Monte Carlo simulation under a fixed seed, the achieved-service-level
 correctness property of the simulated reorder point, and the formula-vs-
-simulation undercoverage finding on a synthetic right-skewed demand series) --
-plus role-based auth end to end: missing/invalid keys rejected with 401,
-an account key blocked from admin-only routes and other accounts' data with
-403, admin able to act on any account's behalf, and the individual-customer
-lookup-or-create endpoint being idempotent per email.
+simulation undercoverage finding on a synthetic right-skewed demand series.
 
 ### Docker
 
@@ -360,14 +286,35 @@ daemon -- build locally to confirm before demoing.)
 
 Deployed on Render's free tier: **https://bedding-franchise-erp.onrender.com/**.
 The free tier spins the container down after 15 minutes idle, so the first
-request after a lull takes ~20-30s to wake it back up. The root URL is the
-guided landing page described above -- it hands you a working key and lets
-you run everything through forms, no curl or reading required. For the raw
-API instead, [`/docs`](https://bedding-franchise-erp.onrender.com/docs) is
-the interactive Swagger UI -- each endpoint's "Try it out" panel has an
-`x_api_key` field to fill in -- covering every endpoint above including the
-two planning tools (`/optimization/production-plan`,
-`/simulation/reorder-point`).
+request after a lull takes ~20-30s to wake it back up -- visit
+[`/docs`](https://bedding-franchise-erp.onrender.com/docs) for the interactive
+Swagger UI to try every endpoint above directly in the browser, including the
+two planning tools (`/optimization/production-plan`, `/simulation/reorder-point`).
+
+### CI
+
+GitHub Actions runs the test suite, a seed-script smoke test, and the full
+reorder-point simulation pipeline on every push to `main` (see
+`.github/workflows/ci.yml`), uploading the simulation chart and
+recommendations CSV as build artifacts each run.
+
+## A CI bug I hit (and how it was diagnosed)
+
+The first CI run passed, but that was luck, not correctness: `pytest tests/`
+run bare (as CI does) failed with `ModuleNotFoundError: No module named 'app'`
+the moment I re-tested it in a clean virtualenv, even though `pytest tests/ -v`
+had worked fine for me locally throughout development.
+
+The cause is a pytest import-mode detail. By default, pytest walks up from
+each test file looking for `__init__.py` files, and adds the first directory
+*without* one to `sys.path`. This repo's `tests/` has no `__init__.py`, so
+that directory is `tests/` itself -- `app/`, one level up, never lands on
+`sys.path`, and `from app import services` fails. It only ever worked on my
+machine because I'd been invoking pytest in a way (`python -m pytest`, which
+also inserts the current directory) that papered over it. Fixed with a
+`pytest.ini` that pins `pythonpath = .`, so the repo root is on `sys.path`
+regardless of how pytest is invoked -- verified with a fresh virtualenv and
+the bare `pytest tests/ -v` command CI actually runs (24 passed).
 
 ## What I'd do next with more time
 
@@ -381,8 +328,7 @@ two planning tools (`/optimization/production-plan`,
 - Replace the synthetic demand history with real order history once there is
   any, and wire the reorder-point recommendation into an actual low-stock
   alert on `/reports/summary` instead of a separate on-demand endpoint.
-- Give the admin role individual staff logins (name + password or SSO)
-  instead of one shared `ADMIN_API_KEY` -- reasonable for a small internal
-  ERP today, not for a team of any real size.
-- Add key rotation/revocation for account API keys -- right now a leaked
-  account key is valid until the account row itself is deleted.
+- Add role-based auth so each account can only see their own orders/AR, not the
+  whole system.
+- Track individual/walk-in customers as their own accounts instead of one shared
+  bucket, once there's an actual POS integration driving that channel.
