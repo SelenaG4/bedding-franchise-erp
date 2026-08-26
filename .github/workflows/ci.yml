@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: pytest tests/ -v
+
+      - name: Smoke-test the demo-data seed script
+        # Exercises app/db.py + app/models.py end to end (schema creation,
+        # six sales channels, 18 SKUs, fabric rolls) -- separate from the
+        # unit tests on purpose, so a break in the actual seeding entry
+        # point fails CI even if no individual test happens to cover it.
+        run: python scripts/seed.py
+
+      - name: Smoke-test the reorder-point simulation pipeline
+        # Regenerates synthetic demand history, then runs the real Monte
+        # Carlo reorder-point analysis end to end (the same script that
+        # produced docs/reorder_point_simulation.png).
+        run: |
+          python scripts/generate_demand_history.py
+          python scripts/run_reorder_point_analysis.py
+
+      - name: Upload reorder-point analysis outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: reorder-point-analysis
+          path: |
+            docs/reorder_point_simulation.png
+            data/reorder_point_recommendations.csv
+          retention-days: 14
+          if-no-files-found: warn
